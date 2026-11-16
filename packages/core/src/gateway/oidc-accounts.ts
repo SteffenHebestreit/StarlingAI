@@ -114,6 +114,8 @@ export function resolveOidcSignIn(identity: OidcIdentity, now: Date = new Date()
     const entry = changeAccountRegistry((doc) => {
       const target = doc.accounts.find((candidate) => candidate.id === known.id)!;
       target.lastSeenAt = at;
+      // The role this sign-in grants, for work done for the account while nobody is signed in.
+      target.grantedRole = identity.role;
       if (requested) target.requestedUsername = requested;
       else delete target.requestedUsername;
       return structuredClone(target);
@@ -139,6 +141,7 @@ export function resolveOidcSignIn(identity: OidcIdentity, now: Date = new Date()
     status: legacy ? "pending" : "active",
     firstSeenAt: at,
     lastSeenAt: at,
+    grantedRole: identity.role,
     ...(legacy ? { legacy: { segment: safeUserSegment(identity.username) } } : {}),
   };
   changeAccountRegistry((doc) => { doc.accounts.push(fresh); });

@@ -62,6 +62,7 @@ import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 import { typedUserWords } from "../agent/delegation-user-words.js";
 import { isKnownAgentName } from "../agent/directive-agent.js";
 import { catalogAgentRunRefusal } from "../agent/full-scope-agent-floor.js";
+import { liveSessionOwnerRole } from "../agent/turn-role.js";
 import { currentRequestContext, runWithRequestContext, type TurnSender } from "../runtime/request-context.js";
 
 /**
@@ -1183,16 +1184,20 @@ export class RpcConnection implements AccountConnection {
         // --agent names an agent this caller may not run: one that maintains the deployment, for a
         // role below agents.fullScopeMinRole, or one an extension hook refuses. The run would be
         // refused with the same words (agent/full-scope-agent-floor.ts); the turn is refused before
-        // it starts instead. Asked for the connection's caller with its live role, and for the
-        // session's owner with the role the session holds, which is who the run answers to: an
-        // admin driving another account's session, or a role changed since the session opened,
-        // leaves them apart, and either refusing refuses.
+        // it starts instead. Asked for the connection's caller with its live role, and, when the
+        // session is another account's (an admin driving it), for that owner with the role the
+        // owner holds now, which the run answers to (agent/turn-role.ts): either refusing refuses.
+        // The connection's own session is asked once, with the live role: the role the session
+        // recorded when it opened may be one its owner no longer holds, either way.
         if (overrideFlags.forceAgent) {
           const session = getSessionRecord(sessionId);
+          const owner = session?.identity();
+          const connIsOwner = getConfig().auth?.enabled === true && ownsRecord(this.connIdentity(), owner);
+          const ownerRole = session && !connIsOwner ? await liveSessionOwnerRole(session) : undefined;
           const callers = [
             { role: this.connRole, identity: this.connIdentity() },
-            ...(session && (session.userRole !== this.connRole || session.userId !== this.connUserId)
-              ? [{ role: session.userRole, identity: session.identity() }]
+            ...(session && !connIsOwner && (ownerRole !== this.connRole || session.userId !== this.connUserId)
+              ? [{ role: ownerRole, identity: owner }]
               : []),
           ];
           for (const caller of callers) {

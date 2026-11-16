@@ -33,7 +33,7 @@ import { getScene } from "../credentials/scenes.js";
 import { isLegacyIdentity, multiUserAuthActive, principalIdentity } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
-import { revalidateAuthenticatedUser } from "../gateway/auth.js";
+import { revalidateAuthenticatedUser, storedAccountRole } from "../gateway/auth.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -183,7 +183,13 @@ function liveJobOwnerRole(job: ClaimedSceneJob, owner: Identity | undefined): st
     ...(owner.account ? { account: owner.account } : {}),
     ...(owner.principal ? { principal: owner.principal } : {}),
   });
-  return live ? live.role : null;
+  if (!live) return null;
+  // The revalidation above hands an identity-provider account the role claim back unchanged: the
+  // role it was queued with. The store's word on it, where there is one, is the role its IdP granted
+  // at its latest sign-in (storedAccountRole); a builtin account's is the one just read.
+  if (!owner.account) return live.role;
+  const stored = storedAccountRole({ userId: owner.userId, account: owner.account });
+  return stored === undefined ? live.role : stored;
 }
 
 /** Ends a claimed job that never started: failed, audited and logged, so it is not left running
@@ -222,7 +228,15 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     return;
   }
   // The role the run's tools see (ToolContext.userRole), through the session as a chat turn's do.
-  const userRole = liveJobOwnerRole(job, owner);
+  // An extension's credential backend answers this lookup, and one that throws (a standalone worker
+  // runs no extension's boot hook) fails the job here: a throw before any handler left it running.
+  let userRole: string | null | undefined;
+  try {
+    userRole = liveJobOwnerRole(job, owner);
+  } catch (err) {
+    await failUnstartedJob(job, `The account that queued this job could not be looked up: ${err instanceof Error ? err.message : String(err)}`, err);
+    return;
+  }
   if (userRole === null) {
     await failUnstartedJob(job, OWNER_SIGNED_OUT_JOB_REFUSAL);
     return;

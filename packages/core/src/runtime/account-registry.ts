@@ -43,6 +43,13 @@ export interface AccountRegistryEntry {
   status: AccountRegistryStatus;
   firstSeenAt: string;
   lastSeenAt: string;
+  /**
+   * The role the IdP granted at the latest sign-in (auth.oidc.roleMapping). A signed-in person's
+   * role is the one their token carries; work done for the account while nobody is signed in (a
+   * queued job, a scheduled run) answers to this one (gateway/auth.ts storedAccountRole). Absent on
+   * an entry written before it was recorded.
+   */
+  grantedRole?: string;
   /** A different username the IdP has since claimed, waiting for an admin's approval. */
   requestedUsername?: string;
   /** Names this account signed in under before an approved rename. They stay held: a grant an
@@ -90,7 +97,9 @@ function entryProblem(value: unknown): string | undefined {
   }
   if (!ACCOUNT_ID_RE.test(entry["id"] as string)) return `entry id '${String(entry["id"])}' is malformed`;
   if (!["active", "pending", "retired"].includes(entry["status"] as string)) return `entry ${String(entry["id"])} has an unknown status`;
-  if (!isOptionalString(entry["requestedUsername"]) || !isOptionalString(entry["retiredAt"])) return `entry ${String(entry["id"])} is malformed`;
+  if (!isOptionalString(entry["requestedUsername"]) || !isOptionalString(entry["retiredAt"]) || !isOptionalString(entry["grantedRole"])) {
+    return `entry ${String(entry["id"])} is malformed`;
+  }
   const former = entry["formerUsernames"];
   if (former !== undefined && (!Array.isArray(former) || former.some((name) => typeof name !== "string"))) return `entry ${String(entry["id"])} is malformed`;
   if (entry["usernameReleased"] !== undefined && typeof entry["usernameReleased"] !== "boolean") return `entry ${String(entry["id"])} is malformed`;

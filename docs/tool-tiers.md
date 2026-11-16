@@ -273,7 +273,7 @@ A tool that requires per-call approval can name the roles that may grant it. Cor
 - **`approverRoles`**: role names as JWT `role` claims carry them, matched like route policies (`policyAdmitsRole`): a listed name, and among the built-in roles every higher one (`operator` admits `admin`). An extension role is never admitted through rank.
 - **`distinctApprover`**: a second person must approve. The requester never decides their own call, whatever their role.
 
-The requester is the person who sent the message: the signed-in caller of the chat socket or of the AG-UI request, with the role they hold now. Sub-agent and workflow calls inherit them. This is not always the session's owner and its stored role. A session keeps the role it was created with, and an admin may drive another account's chat. Where nobody sent a message (a job, A2A, MCP), the requester is the call's own identity and role.
+The requester is the person who sent the message: the signed-in caller of the chat socket or of the AG-UI request, with the role they hold now. Sub-agent and workflow calls inherit them. This is not always the session's owner: an admin may drive another account's chat. Where nobody sent a message (a job, A2A, MCP), the requester is the call's own identity and role.
 
 `executeTool` keeps the requester's own approval card only when all of these hold:
 

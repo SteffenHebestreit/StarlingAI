@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SwarmState, ToolContext } from "../tools/registry.js";
 import { testAccount, testAccountId } from "./support/test-account.js";
+import { PRODUCT } from "../product/index.js";
 
 /**
  * THE CALLER'S ROLE REACHES EVERY RUN, AND AN EXTENSION CAN REFUSE A CALL BEFORE ANYONE IS ASKED TO
@@ -782,6 +783,69 @@ describe("a queued job runs with its owner's role as it stands when the run star
 
     expect(done.status).toBe("completed");
     expect(sessionRoles).toEqual(["viewer"]);
+  });
+
+  /**
+   * The worker of an OIDC deployment whose account registry holds `olga`, an identity-provider
+   * account, with the role her IdP granted at her latest sign-in, or none recorded.
+   */
+  async function oidcWorker(grantedRole?: string) {
+    const dir = deployment({ auth: { enabled: true, provider: "oidc", users: [] } });
+    mkdirSync(join(dir, PRODUCT.stateDirName), { recursive: true });
+    writeFileSync(join(dir, PRODUCT.stateDirName, "accounts.json"), JSON.stringify({
+      version: 1,
+      bootstrapSubs: [],
+      accounts: [{
+        id: OLGA_ACCOUNT, issuer: "https://idp.example", subject: "subject-olga", username: "olga",
+        status: "active", firstSeenAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-02T00:00:00Z",
+        ...(grantedRole ? { grantedRole } : {}),
+      }],
+    }), "utf8");
+    sessionRoles = [];
+    contextRoles = [];
+    vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
+      runTurn: vi.fn(async (opts: { session: { userRole?: string } }) => {
+        const { currentRequestContext } = await import("../runtime/request-context.js");
+        sessionRoles.push(opts.session.userRole);
+        contextRoles.push(currentRequestContext()?.callerRole);
+        return { response: "ran", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      }),
+    }));
+    (await import("../runtime/account-registry.js")).resetAccountRegistryForTests();
+    const [jobs, scene] = await Promise.all([import("../agent/jobs.js"), import("../agent/scene-worker.js")]);
+    return { jobs, scene };
+  }
+  const OLGA_ACCOUNT = "oidc-0123456789abcdef";
+  const olga = { userId: "olga", account: OLGA_ACCOUNT };
+
+  it("an identity-provider account's job runs with the role its IdP granted at the latest sign-in, not the queued one", async () => {
+    // olga queued it as an admin; her IdP has since granted her operator at a sign-in.
+    const mods = await oidcWorker("operator");
+
+    const done = await runOne(mods, { ...olga, requestedByRole: "admin" });
+
+    expect(done.status).toBe("completed");
+    expect(sessionRoles).toEqual(["operator"]);
+  });
+
+  it("an identity-provider account whose registry entry records no granted role keeps the role it queued with", async () => {
+    const mods = await oidcWorker();
+
+    const done = await runOne(mods, { ...olga, requestedByRole: "admin" });
+
+    expect(done.status).toBe("completed");
+    expect(sessionRoles).toEqual(["admin"]);
+  });
+
+  it("an identity-provider account granted a role nobody declares now has its job fail, as one that no longer signs in", async () => {
+    const mods = await oidcWorker("auditor");
+
+    const done = await runOne(mods, { ...olga, requestedByRole: "operator" });
+
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe(mods.scene.OWNER_SIGNED_OUT_JOB_REFUSAL);
+    expect(sessionRoles).toEqual([]);
   });
 
   it("each run of a schedule a person made runs with the owner's role as it stands then", async () => {

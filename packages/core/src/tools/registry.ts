@@ -992,8 +992,8 @@ function policyAdmits(policy: ToolApprovalPolicy, role: string | undefined): rol
 
 /**
  * Who asks for a call, and as which role. In a turn a signed-in person sent (RequestContext.sender:
- * the chat socket, AG-UI), that person as they are now, not the session's owner and stored role: a
- * session keeps the role it was created with, and an admin may drive another account's chat.
+ * the chat socket, AG-UI), that person as they are now, not the session's owner: an admin may drive
+ * another account's chat, whose turn answers to that owner's role (agent/turn-role.ts).
  * Otherwise the call's own (a job's owner, an A2A or MCP caller): the ToolContext's role, else the
  * request context's.
  */

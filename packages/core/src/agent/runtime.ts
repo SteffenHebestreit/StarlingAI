@@ -22,6 +22,7 @@ import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.j
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
 import { assembleTurnSystemMessages, buildDirectiveAgentPrompt, turnIsStillDiscovering } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
+import { turnRole } from "./turn-role.js";
 import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, autoApprovingCallback, type ApprovalCallback, type SwarmState, type ToolContext } from "../tools/registry.js";
@@ -1211,10 +1212,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
     const userMessageLanguage = currentRequestContext()?.userMessageLanguage
       ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
-    // The role of the person the turn answers to: the session's own, else the enclosing work's (a
-    // workflow step's nested turn runs on a session of its own, which no sign-in created). Every
-    // delegation the turn makes inherits it from the context (RequestContext.callerRole).
-    const callerRole = opts.session.userRole ?? currentRequestContext()?.callerRole;
+    // The role of the person the turn answers to, as it stands now (agent/turn-role.ts): the sender's
+    // in a chat of their own, else the session owner's, else the enclosing work's (a workflow step's
+    // nested turn runs on a session of its own, which no sign-in created). Every delegation the turn
+    // makes inherits it from the context (RequestContext.callerRole), and so do its tools.
+    const callerRole = (await turnRole(opts.session, sender?.())) ?? currentRequestContext()?.callerRole;
     intentShadow = intentShadowTurnStarted({
       sessionId: opts.session.id,
       turnId,
@@ -2382,9 +2384,10 @@ async function _runTurn(
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
     identity: session.identity(),
-    // The session's role, else the one the turn inherited (runTurn): a workflow step's nested turn
-    // runs on a session no sign-in created, and its tools answer to the person who started it.
-    userRole: session.userRole ?? currentRequestContext()?.callerRole,
+    // The role runTurn put on this turn's context: the one the turn answers to now (agent/turn-role.ts),
+    // else the one it inherited, as a workflow step's nested turn on a session no sign-in created,
+    // whose tools answer to the person who started it.
+    userRole: currentRequestContext()?.callerRole ?? session.userRole,
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
     // continue on your stated assumption". Before, the tool refused and the model looped on it.

@@ -391,11 +391,13 @@ export function revalidateAuthenticatedUser(user: AuthenticatedUser): Authentica
 
 /**
  * The role the store holds for an account now, for work done for it that carries no role of its own
- * (a queued job, a scheduled run). A builtin account's record holds one, and so does an extension
- * auth provider's user. Null when the account no longer signs in (gone, retired, renamed, its id
- * held by another, or its role one that nobody declares). Undefined when the store holds no role
- * for it (an identity-provider account, whose role the IdP grants at each sign-in), when the
- * identity names no account, or with auth off.
+ * (a queued job, a scheduled run, a turn nobody sent). A builtin account's record holds one, and so
+ * does an extension auth provider's user. An identity-provider account's is the role the IdP granted
+ * at its latest sign-in, which the account registry records (AccountRegistryEntry.grantedRole): the
+ * IdP grants it at each sign-in, and between two sign-ins that is the latest word on it. Null when
+ * the account no longer signs in (gone, retired, renamed, its id held by another, or its role one
+ * that nobody declares). Undefined when the store holds no role for it (an identity-provider
+ * account whose entry predates that record), when the identity names no account, or with auth off.
  */
 export function storedAccountRole(identity: Pick<Identity, "userId" | "account">): AuthRole | null | undefined {
   const account = identity.account;
@@ -405,7 +407,11 @@ export function storedAccountRole(identity: Pick<Identity, "userId" | "account">
   if (!live?.account || !sameAccountId(live.account, account)) return null;
   const roleIsStored = getExtensionAuthProvider() !== null
     || getConfig().auth.users.some((user) => user.id !== undefined && sameAccountId(user.id, account));
-  return roleIsStored ? live.role : undefined;
+  if (roleIsStored) return live.role;
+  const granted = accountRegistryEntryById(account)?.grantedRole;
+  if (granted === undefined) return undefined;
+  // A granted role that nobody declares now (an extension that no longer loads) signs nobody in.
+  return declaredRole(granted) ?? null;
 }
 
 interface CallerClaims {

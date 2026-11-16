@@ -14,7 +14,12 @@ import { testAccount } from "./support/test-account.js";
  * scheduled run of a builtin account holding one failed as one of an account that no longer signs
  * in, and its schedules were removed after their refused runs (before roles failed closed, those
  * jobs ran as operator). The worker now declares the extensions' roles when it starts, exactly when
- * the gateway's loader would declare them, and registers nothing else of them.
+ * the gateway's loader would declare them.
+ *
+ * It registers their credential backend too (authProvider): with one, the gateway looks every
+ * account up in that store and nowhere else (gateway/auth.ts resolveCaller), and a worker without it
+ * looked the owners up in the builtin roster instead, where an extension store's accounts are not.
+ * Nothing else of them: no tool, hook, policy, route or boot.
  */
 
 // The extension loader's error lines, recorded.
@@ -203,7 +208,8 @@ describe("the standalone scene worker", () => {
   it("runs a job of a builtin account holding an extension's role with that role, and still refuses one nobody declares", { timeout: 60_000 }, async () => {
     deployment([dora.record, pat.record, tom.record]);
     stubWorkerBoot();
-    useExtensions(await import("../extension/loader.js"), manifestImporter());
+    // Builtin accounts: the extension declares roles and no credential backend of its own.
+    useExtensions(await import("../extension/loader.js"), manifestImporter({ authProvider: undefined }));
 
     await (await import("../scene-worker-main.js")).main();
     const [jobs, scene, extension] = await Promise.all([
@@ -241,15 +247,76 @@ describe("the standalone scene worker", () => {
     expect(turnRoles).toEqual({});
     expect(loaderErrors).toEqual([expect.objectContaining({ message: ROLES_NOT_DECLARED, fields: expect.objectContaining({ extension: "praxis" }) })]);
   });
+
+  /** praxis with a credential backend that holds `users` (by id), and throws for the id "u-boom". */
+  const storeImporter = (users: Record<string, { username: string; role: string }>) => manifestImporter({
+    authProvider: {
+      verifyCredentials: async () => null,
+      getUserById: (id: string) => {
+        if (id === "u-boom") throw new Error("praxis store: not connected");
+        const user = users[id];
+        return user ? { id, ...user } : null;
+      },
+    },
+  });
+
+  it("runs a job of an account in the extension's credential store with the role the store holds now, and fails one it no longer holds", { timeout: 60_000 }, async () => {
+    deployment([]);
+    stubWorkerBoot();
+    // nora was a patient when she queued it, and is a doctor in the store now.
+    useExtensions(await import("../extension/loader.js"), storeImporter({ "u-nora": { username: "nora", role: "doctor" } }));
+
+    await (await import("../scene-worker-main.js")).main();
+    const [jobs, scene, extension, accounts] = await Promise.all([
+      import("../agent/jobs.js"),
+      import("../agent/scene-worker.js"),
+      import("../extension/index.js"),
+      import("../runtime/accounts.js"),
+    ]);
+    const queue = (id: string, requestedByRole: string) =>
+      jobs.createJob({ sceneName: "nightly", task: "Summarise the day.", turnTimeoutMs: 30_000, userId: id, account: accounts.extensionAccountId(id), requestedByRole });
+    const [noraQueued, goneQueued] = [await queue("u-nora", "patient"), await queue("u-gone", "doctor")] as const;
+    const [noraJob, goneJob] = await Promise.all([settled(jobs, noraQueued.id), settled(jobs, goneQueued.id)]);
+
+    // Before, both failed: the worker looked them up in the builtin roster, which is empty here.
+    expect(noraJob, noraJob.error).toMatchObject({ status: "completed" });
+    expect(goneJob).toMatchObject({ status: "failed", error: scene.OWNER_SIGNED_OUT_JOB_REFUSAL });
+    expect(turnRoles).toEqual({ "u-nora": "doctor" });
+    expect(extension.getExtensionAuthProvider()).not.toBeNull();
+    // The backend only: the extension itself is not loaded, and its boot does not run.
+    expect(extension.listLoadedExtensions()).toEqual([]);
+    expect(praxisBoot).not.toHaveBeenCalled();
+    expect(loaderErrors).toEqual([]);
+  });
+
+  it("a credential backend that throws fails that job with the reason, and the worker goes on to the next", { timeout: 60_000 }, async () => {
+    deployment([]);
+    stubWorkerBoot();
+    useExtensions(await import("../extension/loader.js"), storeImporter({ "u-nora": { username: "nora", role: "doctor" } }));
+
+    await (await import("../scene-worker-main.js")).main();
+    const [jobs, accounts] = await Promise.all([import("../agent/jobs.js"), import("../runtime/accounts.js")]);
+    const queue = (id: string) =>
+      jobs.createJob({ sceneName: "nightly", task: "Summarise the day.", turnTimeoutMs: 30_000, userId: id, account: accounts.extensionAccountId(id), requestedByRole: "doctor" });
+    const [boomQueued, noraQueued] = [await queue("u-boom"), await queue("u-nora")] as const;
+    const [boomJob, noraJob] = await Promise.all([settled(jobs, boomQueued.id), settled(jobs, noraQueued.id)]);
+
+    expect(boomJob).toMatchObject({
+      status: "failed",
+      error: "The account that queued this job could not be looked up: praxis store: not connected",
+    });
+    expect(noraJob, noraJob.error).toMatchObject({ status: "completed" });
+    expect(turnRoles).toEqual({ "u-nora": "doctor" });
+  });
 });
 
 describe("registerCoreExtensionRoles", () => {
-  it("declares the extensions' roles and registers nothing else of them", async () => {
+  it("declares the extensions' roles and registers their credential backend, and nothing else of them", async () => {
     deployment([]);
     const loader = await import("../extension/loader.js");
     useExtensions(loader, manifestImporter());
 
-    expect(await loader.registerCoreExtensionRoles()).toMatchObject({ registered: 1, failed: 0 });
+    expect(await loader.registerCoreExtensionRoles()).toMatchObject({ registered: 1, failed: 0, authProvider: "praxis" });
 
     const [extension, auth, registry, tiers, routePolicies, rpcPolicy] = await Promise.all([
       import("../extension/index.js"),
@@ -262,11 +329,12 @@ describe("registerCoreExtensionRoles", () => {
     expect(auth.declaredRole("doctor")).toBe("doctor");
     expect(auth.roleRank("doctor")).toBe(80);
     expect(auth.roleRank("patient")).toBe(10);
-    // Not loaded: no record, tool, tier, credential store, hook, policy or boot.
+    // The store every account of the process is looked up in, as the gateway's loader registers it.
+    expect(extension.getExtensionAuthProvider()).not.toBeNull();
+    // Not loaded: no record, tool, tier, hook, policy or boot.
     expect(extension.listLoadedExtensions()).toEqual([]);
     expect(registry.getTool("praxis_lookup")).toBeUndefined();
     expect(tiers.isCompileTimeMappedTool("praxis_lookup")).toBe(false);
-    expect(extension.getExtensionAuthProvider()).toBeNull();
     expect(extension.getExtensionGuardrailHooks()).toEqual([]);
     expect(extension.getExtensionAgentRunAuthorizers()).toEqual([]);
     expect(routePolicies.findRoutePolicy("GET", "/api/praxis/records")).toBeNull();

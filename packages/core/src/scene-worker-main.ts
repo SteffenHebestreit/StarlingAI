@@ -68,11 +68,12 @@ export async function main() {
   // of each account's workspace state out of its root, before any of them (src/index.ts).
   await relocateAccountWorkspaceState(config.workspacePath);
 
-  // The core extensions' roles, and nothing else of them, before anything here runs work for an
-  // account. This process loads no extension, but it runs each queued job with its owner's role as
-  // the auth layer holds it (agent/scene-worker.ts), and under multi-user auth a role nobody declares
-  // signs nobody in (gateway/auth.ts declaredRole): every job of an account holding an extension's
-  // role failed here as one of an account that no longer signs in.
+  // The core extensions' roles and credential backend, and nothing else of them, before anything here
+  // runs work for an account. This process loads no extension, but it runs each queued job with its
+  // owner's role as the auth layer holds it (agent/scene-worker.ts): under multi-user auth a role
+  // nobody declares signs nobody in (gateway/auth.ts declaredRole), and an extension's credential
+  // backend is the only store its accounts are in. Without either, every job of such an account
+  // failed here as one of an account that no longer signs in.
   const extensionRoles = await registerCoreExtensionRoles();
   if (extensionRoles.registered > 0 || extensionRoles.failed > 0) {
     log.info(extensionRoles, "Core extension roles registered");

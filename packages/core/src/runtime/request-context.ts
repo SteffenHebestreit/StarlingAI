@@ -133,10 +133,9 @@ export interface RequestContext {
   /**
    * The signed-in person who sent the message this work answers, read when asked. Set by runTurn
    * from RunTurnOptions.sender (the chat socket, AG-UI) and inherited by every run the turn starts.
-   * It is not always the session's owner, and its role is not always the session's: an admin may
-   * drive another account's chat, and a session keeps the role it was created with. An approval
-   * policy decides on it (tools/registry.ts). Unset where no signed-in person sent a message (a
-   * job, a channel, A2A, MCP).
+   * It is not always the session's owner: an admin may drive another account's chat, whose turn then
+   * answers to that owner (agent/turn-role.ts). An approval policy decides on it (tools/registry.ts).
+   * Unset where no signed-in person sent a message (a job, a channel, A2A, MCP).
    */
   sender?: () => TurnSender;
 }

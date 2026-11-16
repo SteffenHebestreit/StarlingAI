@@ -228,12 +228,13 @@ Notes:
   in `refuse`. The hook runs in the processes that load extensions: the gateway
   and its embedded scene worker. A standalone scene worker
   (`scene-worker-main.ts`) loads none, so neither your tools nor your hook
-  exist there. It declares your roles, though, and nothing else of your
-  extension, so a job of a builtin account holding one of them runs there with
-  that role; if your module does not import there or its manifest is refused,
-  your roles are not declared there either, and those jobs fail. To read the
-  roles it imports your module, so its top-level code runs there too (`boot`
-  does not): keep work out of it. A hook that is not a function refuses every
+  exist there. It declares your roles, though, and registers your
+  `authProvider` when you declare one, and nothing else of your extension, so a
+  job of an account holding one of your roles runs there with that role; if your
+  module does not import there or its manifest is refused, your roles are not
+  declared there either, and those jobs fail. To read the roles it imports your
+  module, so its top-level code runs there too (`boot` does not): keep work out
+  of it, and make your `authProvider`'s `getUserById` answer without `boot`. A hook that is not a function refuses every
   call, and a tool whose `refuse` is not a function is not registered. Both
   are logged at boot, and the extension still loads, with its roles.
 - A tool's `effect` block (ADR-005) is honoured like a built-in's, so an
@@ -427,9 +428,10 @@ run routes) or of a scheduled run. Such a job or run answers to the role its
 account holds when it runs. `search_agents`/`list_agents` do not offer the agents
 to a role below the floor. The floor refuses no run whose role is unknown: a
 channel, a cron or channel trigger, a federation peer, or a queued run of an
-identity-provider account that carries no role (the IdP grants that role at
-sign-in, and no store keeps it). To refuse those, or any agent for any caller,
-add `authorizeAgentRun`:
+identity-provider account whose account registry entry records no granted role
+(the registry records the role the IdP grants at each sign-in; an entry written
+by an older gateway has none until the person signs in again). To refuse those,
+or any agent for any caller, add `authorizeAgentRun`:
 
 ```ts
 export default defineCoreExtension({
