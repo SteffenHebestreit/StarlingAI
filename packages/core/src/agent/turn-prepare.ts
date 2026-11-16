@@ -34,6 +34,15 @@ import { segmentFor } from "../runtime/user-scope.js";
 
 const log = childLogger("agent:runtime");
 
+/**
+ * Session channels on which the scene worker runs a queued scene's or job's task: operator-authored
+ * workflow text, which the input guardrail flags but does not block (prepareInputGuardrails). Only
+ * the gateway's own scene and job runner opens sessions on them, and a client may not pick one
+ * (session.create). The task text alone is trusted there (RunTurnOptions._trustedWorkflowInput):
+ * a client's message on such a session is screened like any other.
+ */
+export const TRUSTED_WORKFLOW_CHANNELS: ReadonlySet<string> = new Set(["scene"]);
+
 export function blocked(reason: string, swarmState?: SwarmState, performance?: TurnPerformanceMetrics): TurnOutput {
   return {
     response: reason,
@@ -120,14 +129,18 @@ export async function prepareInputGuardrails(
   userMessage: string,
   session: AgentSession,
   guardrailEvents: NonNullable<TurnOutput["guardrailEvents"]>,
+  /** The message is the scene worker's own task text (RunTurnOptions._trustedWorkflowInput). */
+  workflowTask = false,
 ): Promise<TurnOutput | null> {
   // Scene/job runs carry the operator-authored task text from config as the
   // "message" (channel "scene"). That is trusted input, so the prompt-injection
   // scanner flags but does not block it — otherwise a scene's own security
   // instruction (e.g. "Never expose credential values") would hard-block the run
   // with zero turns. Untrusted channels (chat, telegram, email, webhook, a2a, …)
-  // remain strictly blocked.
-  const trustedWorkflowInput = session.channel === "scene";
+  // remain strictly blocked. Trust follows where the text came from, not the
+  // session alone: a client could chat into a running scene's session (its owner
+  // may), and its message was waved through as if the scene had written it.
+  const trustedWorkflowInput = workflowTask && TRUSTED_WORKFLOW_CHANNELS.has(session.channel);
   const inputCheck = checkInput(userMessage, { trusted: trustedWorkflowInput });
   if (!inputCheck.allowed) {
     const details = inputCheck.reason ?? "Prompt injection detected";

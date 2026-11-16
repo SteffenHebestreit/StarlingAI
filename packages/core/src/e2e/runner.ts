@@ -726,9 +726,9 @@ export interface WorkspaceResetResult {
  * A reset that fails is a note, and the attempt runs, as with the memory reset: a file left from
  * earlier is a confound the report names, not a verdict, and a scenario that needs a file absent
  * deletes it and checks that in its own steps. Failing the attempt instead would end every attempt
- * against a gateway built before the route (HTTP 404) as a harness error, and every scenario with
- * a viewer turn: the route is operator-only like every mutating route, so eval-viewer's generated/
- * is refused (HTTP 403).
+ * against a gateway built before the route (HTTP 404) as a harness error, and every scenario run as
+ * eval-viewer: the route is operator-only like every mutating route, so eval-viewer's generated/ is
+ * refused (HTTP 403).
  */
 export async function resetWorkspace(identity: string, deps: RunnerDeps, signal?: AbortSignal, turnWaitMs = 0): Promise<WorkspaceResetResult> {
   const notes: string[] = [];

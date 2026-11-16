@@ -2,6 +2,8 @@
  * `pnpm e2e:setup [--remove]` — the LOCAL accounts the harness logs in as:
  *   eval         role operator
  *   eval-viewer  role viewer
+ *   eval-peer    role operator: a second account that chats, for the checks that one account
+ *                cannot get at another's data (the gateway runs no turn for a viewer)
  *
  * Writes config/gateway/31-e2e.local.jsonc = { auth: { users: [...] } } with bcrypt hashes from
  * the gateway's own hashPassword, and the plaintext passwords ONLY to
@@ -11,7 +13,7 @@
  * which mounts the compiled starlingai.json and reloads it, picks the accounts up.
  *
  * It also writes config/mail/accounts.d/00-e2e-isolation.json5 = { accounts: [], isolatedUsers:
- * ["eval", "eval-viewer"] }: the mail-service unites isolatedUsers across its overlay documents and
+ * [every eval account] }: the mail-service unites isolatedUsers across its overlay documents and
  * withholds every SHARED account (one without allowedUsers) from those users, so an eval turn can
  * never read or send from the operator's real mailboxes — whenever the eval accounts exist, not
  * only while `pnpm e2e:env up` has the GreenMail account in place. (.json5 and config/mail/ both
@@ -22,7 +24,8 @@
  * overlay, defines accounts — and writes nothing.
  *
  * Idempotent: accounts already in place whose passwords still verify are kept as they are; one
- * written before account ids existed gets an id (auth.users[].id) and keeps its password.
+ * written before account ids existed gets an id (auth.users[].id) and keeps its password, and an
+ * account the shard lacks (one added to the harness since) is written beside them.
  * `--remove` deletes the three files and rebuilds. Passwords are never printed.
  *
  * SAI_CONFIG_PATH (a config directory) and SAI_WORKSPACE_CONFIG_PATH point setup at another
@@ -52,13 +55,19 @@ export interface E2EAccountSpec {
 export const E2E_ACCOUNTS: readonly E2EAccountSpec[] = [
   { identity: "eval", username: "eval", role: "operator", displayName: "E2E eval (operator)" },
   { identity: "eval-viewer", username: "eval-viewer", role: "viewer", displayName: "E2E eval (viewer)" },
+  { identity: "eval-peer", username: "eval-peer", role: "operator", displayName: "E2E eval peer (operator)" },
 ];
 
 export const E2E_SHARD_FILE = "31-e2e.local.jsonc";
 export const E2E_MAIL_ISOLATION_FILE = "00-e2e-isolation.json5";
 
 /** The isolation-only mail overlay document: no account, just the users kept off shared accounts. */
-export const E2E_MAIL_ISOLATION_DOCUMENT = { accounts: [] as never[], isolatedUsers: ["eval", "eval-viewer"] };
+export const E2E_MAIL_ISOLATION_DOCUMENT = { accounts: [] as never[], isolatedUsers: E2E_ACCOUNTS.map((account) => account.username) };
+
+/** "a", "a and b", "a, b and c". */
+function listNames(names: readonly string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 export interface SetupPaths {
   repoRoot: string;
@@ -243,22 +252,27 @@ function readJsonRecord(path: string, json5 = false): Record<string, unknown> | 
   }
 }
 
-/** Both files exist, name both accounts with their roles, and every password verifies: the shard's
- *  account records then, null otherwise. */
-async function accountsInPlace(paths: SetupPaths): Promise<Array<Record<string, unknown>> | null> {
+/** The shard's account records, and the eval accounts in place among them: each whose record has its
+ *  role and whose password in the credentials file still verifies, by identity. */
+async function accountsInPlace(paths: SetupPaths): Promise<{
+  users: Array<Record<string, unknown>>;
+  inPlace: Map<string, { user: Record<string, unknown>; credential: CredentialsEntry }>;
+}> {
   const shard = readJsonRecord(paths.shardPath, true);
   const credentials = readJsonRecord(paths.credentialsPath);
   const auth = shard && isRecord(shard["auth"]) ? shard["auth"] : null;
   const users = auth && Array.isArray(auth["users"]) ? auth["users"].filter(isRecord) : [];
-  if (!credentials || users.length !== E2E_ACCOUNTS.length) return null;
+  const inPlace = new Map<string, { user: Record<string, unknown>; credential: CredentialsEntry }>();
+  if (!credentials) return { users, inPlace };
   for (const account of E2E_ACCOUNTS) {
     const entry = credentials[account.identity];
     const user = users.find((candidate) => candidate["username"] === account.username);
-    if (!isRecord(entry) || entry["username"] !== account.username || typeof entry["password"] !== "string") return null;
-    if (!user || user["role"] !== account.role || typeof user["passwordHash"] !== "string") return null;
-    if (!await bcrypt.compare(entry["password"], user["passwordHash"])) return null;
+    if (!isRecord(entry) || entry["username"] !== account.username || typeof entry["password"] !== "string") continue;
+    if (!user || user["role"] !== account.role || typeof user["passwordHash"] !== "string") continue;
+    if (!await bcrypt.compare(entry["password"], user["passwordHash"])) continue;
+    inPlace.set(account.identity, { user, credential: { username: account.username, password: entry["password"] } });
   }
-  return users;
+  return { users, inPlace };
 }
 
 /**
@@ -316,8 +330,8 @@ function newPassword(): string {
 
 function shardText(users: Array<Record<string, unknown>>): string {
   return [
-    "// GENERATED by `pnpm e2e:setup`: the local end-to-end test accounts (eval = operator,",
-    "// eval-viewer = viewer). Git-ignored (config/**/*.local.jsonc); remove with `pnpm e2e:setup --remove`.",
+    `// GENERATED by \`pnpm e2e:setup\`: the local end-to-end test accounts (${E2E_ACCOUNTS.map((account) => `${account.username} = ${account.role}`).join(", ")}).`,
+    "// Git-ignored (config/**/*.local.jsonc); remove with `pnpm e2e:setup --remove`.",
     "// The passwords are only in eval/e2e/.credentials.local.json.",
     JSON.stringify({ auth: { users } }, null, 2),
     "",
@@ -377,7 +391,7 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
     throw new SetupRefusedError([
       `Refusing to write ${show(paths.shardPath)}: config arrays replace each other when shards merge, so the eval accounts cannot sit beside other auth.users.`,
       ...scan.conflicts.map((conflict) => `  - ${conflict}`),
-      "Nothing was written. To run the harness beside those accounts, add the two eval accounts to that list yourself",
+      "Nothing was written. To run the harness beside those accounts, add the eval accounts to that list yourself",
       `(usernames ${E2E_ACCOUNTS.map((account) => `${account.username} = ${account.role}`).join(", ")}; hashes from the gateway's hashPassword)`,
       `and put their passwords in ${show(paths.credentialsPath)} as { "<identity>": { "username", "password" } }.`,
     ].join("\n"));
@@ -390,15 +404,16 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
   }
 
   let action: SetupResult["action"];
-  const inPlace = await accountsInPlace(paths);
-  if (inPlace) {
+  const { users: shardUsers, inPlace: accounts } = await accountsInPlace(paths);
+  if (accounts.size === E2E_ACCOUNTS.length && shardUsers.length === E2E_ACCOUNTS.length) {
     action = "kept";
+    const inPlace = shardUsers;
     // Accounts written before account ids existed: each gets one, and keeps its password, so the
     // credentials file stays valid and nothing else changes.
     const minted = ensureAccountIds(inPlace);
     if (minted.length > 0) {
       writeFileSync(paths.shardPath, shardText(inPlace), "utf8");
-      log(`The e2e accounts in ${show(paths.shardPath)} are in place; gave ${minted.join(" and ")} an account id, passwords unchanged.`);
+      log(`The e2e accounts in ${show(paths.shardPath)} are in place; gave ${listNames(minted)} an account id, passwords unchanged.`);
     } else {
       log(`The e2e accounts in ${show(paths.shardPath)} are in place and match ${show(paths.credentialsPath)}; kept.`);
     }
@@ -407,6 +422,14 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
     const users: Array<Record<string, unknown>> = [];
     const credentials: Record<string, CredentialsEntry> = {};
     for (const account of E2E_ACCOUNTS) {
+      // An account in place keeps its record (its id, so its storage) and its password: a shard
+      // written before an account was added to the harness only gains that account.
+      const kept = accounts.get(account.identity);
+      if (kept) {
+        users.push(kept.user);
+        credentials[account.identity] = kept.credential;
+        continue;
+      }
       const password = newPassword();
       users.push({ username: account.username, passwordHash: await hashPassword(password), displayName: account.displayName, role: account.role, createdAt });
       credentials[account.identity] = { username: account.username, password };
@@ -417,10 +440,12 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
     writeFileSync(paths.shardPath, shardText(users), "utf8");
     writeFileSync(paths.credentialsPath, `${JSON.stringify(credentials, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     action = "created";
-    log(`Wrote ${E2E_ACCOUNTS.map((account) => `${account.username} (${account.role})`).join(" and ")} to ${show(paths.shardPath)}; passwords in ${show(paths.credentialsPath)}.`);
+    const written = E2E_ACCOUNTS.filter((account) => !accounts.has(account.identity)).map((account) => `${account.username} (${account.role})`);
+    const keptNames = E2E_ACCOUNTS.filter((account) => accounts.has(account.identity)).map((account) => account.username);
+    log(`Wrote ${listNames(written)} to ${show(paths.shardPath)}${keptNames.length > 0 ? `, beside ${listNames(keptNames)} as they were` : ""}; passwords in ${show(paths.credentialsPath)}.`);
   }
   log(ensureMailIsolation(paths)
-    ? `Wrote ${show(paths.mailIsolationPath)}: the mail-service withholds every shared account from eval and eval-viewer.`
+    ? `Wrote ${show(paths.mailIsolationPath)}: the mail-service withholds every shared account from ${listNames(E2E_ACCOUNTS.map((account) => account.username))}.`
     : `${show(paths.mailIsolationPath)} is in place.`);
   for (const warning of warnings) log(`Warning: ${warning}`);
   const built = await rebuild();

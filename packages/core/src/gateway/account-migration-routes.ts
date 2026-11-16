@@ -19,7 +19,7 @@ import type { Hono } from "hono";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { authenticatedUser, userHasRole } from "./auth.js";
-import { findRoutePolicy, registerRoutePolicies } from "./route-policies.js";
+import { registerRoutePolicies, routePolicyChain } from "./route-policies.js";
 import {
   defaultAccountMigrationBackends,
   parseAccountMigrationRequest,
@@ -39,7 +39,9 @@ export function registerAccountMigrationRoutes(
   backends: () => Promise<AccountMigrationBackends> = defaultAccountMigrationBackends,
 ): void {
   // Admins only, enforced by the policy gate in front of every /api route, then the token's kind here.
-  if (!findRoutePolicy("POST", ACCOUNT_MIGRATION_ROUTE)) {
+  // Registered unless a roles policy already decides the route (this one, from an earlier call, or an
+  // extension's): an extension's deny policy in front passes the callers it does not name on to it.
+  if (!routePolicyChain("POST", ACCOUNT_MIGRATION_ROUTE).some((policy) => policy.roles)) {
     registerRoutePolicies("core:account-migration", [{ method: "POST", pattern: ACCOUNT_MIGRATION_ROUTE, roles: ["admin"] }]);
   }
 

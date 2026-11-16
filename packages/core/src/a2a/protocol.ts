@@ -107,5 +107,6 @@ export const A2A_ERROR = {
   INTERNAL: { code: -32603, message: "Internal error" },
   AGENT_NOT_FOUND: { code: -32001, message: "Agent not found" },
   UNAUTHORIZED: { code: -32002, message: "Unauthorized" },
+  FORBIDDEN: { code: -32003, message: "Operator role required" },
   TASK_NOT_FOUND: { code: -32004, message: "Task not found" },
 } as const;

@@ -39,7 +39,7 @@ describe("tool registry approval enforcement", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/^Tool 'http_request' execution denied by user\. /);
-    expect(approvalCallback).toHaveBeenCalledWith("http_request", { url: "https://example.com/healthz" });
+    expect(approvalCallback).toHaveBeenCalledWith("http_request", { url: "https://example.com/healthz" }, { humanInLoopStep: false });
   });
 
   // A declined switch_model was asked for again in 3 lab runs of 32 (a second approval card, then the
@@ -75,7 +75,7 @@ describe("tool registry approval enforcement", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/^Tool 'git_status' execution denied by user\. /);
-    expect(approvalCallback).toHaveBeenCalledWith("git_status", { path: "packages/core" });
+    expect(approvalCallback).toHaveBeenCalledWith("git_status", { path: "packages/core" }, { humanInLoopStep: true });
   });
 
   it("propagates a rejection from the approval callback (e.g. timeout) as the tool error", async () => {

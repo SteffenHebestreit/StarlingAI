@@ -115,34 +115,46 @@ export async function handleAguiStream(
   // deleted one's name drove the old one's sessions, and so did any caller whose name a channel
   // sender's session carried. A session from before account ids is an admin's alone.
   const callerWho = caller?.identity ?? (userId ? { userId } : undefined);
+  // ADMIN, not operator: operator is the role every account gets by default.
+  const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
+  /** The owner of a session the caller may not drive, else undefined: with auth off, for an admin,
+   *  for a session with no owner and for its owner, nothing to refuse. */
+  const ownerRefused = (found: { identity(): Identity | undefined }): Identity | undefined => {
+    if (getConfig().auth?.enabled !== true || isAdmin) return undefined;
+    const owner = found.identity();
+    return recordHasOwner(owner) && !ownsRecord(callerWho, owner) ? owner : undefined;
+  };
+  // Opaque 404 to match the RPC not-found shape and avoid confirming the session id exists.
+  const refuse = (owner: Identity): void => {
+    log.warn({ sessionId, owner: owner.userId, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Session not found" }));
+  };
   const existingRecord = sessionId ? getSessionRecord(sessionId) : undefined;
-  if (existingRecord && getConfig().auth?.enabled === true) {
-    const owner = existingRecord.identity();
-    // ADMIN, not operator: operator is the role every account gets by default.
-    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
-    if (recordHasOwner(owner) && !ownsRecord(callerWho, owner) && !isAdmin) {
-      log.warn({ sessionId, owner: owner.userId, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Session not found" }));
-      return;
-    }
+  const heldForOther = existingRecord ? ownerRefused(existingRecord) : undefined;
+  if (heldForOther) {
+    refuse(heldForOther);
+    return;
   }
-  let session = sessionId ? await resolveSession(sessionId, { resumeArchived: true }) : undefined;
-
-  // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a
-  // caller drive a turn on another user's existing session — the same invariant the
-  // RPC chat path enforces via canAccessSession. Admins may access any session;
-  // unowned sessions and auth-off deployments fall through. Opaque 404 to match the
-  // RPC not-found shape and avoid confirming the session id exists.
-  if (session && getConfig().auth?.enabled === true) {
-    const owner = session.identity();
-    const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
-    if (recordHasOwner(owner) && !ownsRecord(callerWho, owner) && !isAdmin) {
-      log.warn({ sessionId: session.id, owner: owner.userId, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Session not found" }));
-      return;
-    }
+  // Ownership gate (decided BEFORE we commit to the SSE 200 response): don't let a caller drive a
+  // turn on another user's existing session, the same invariant the RPC chat path enforces. A record
+  // only the durable store holds (another gateway instance's session, or one this process has not
+  // loaded) is checked by `admit`, before resolveSession hydrates it into this process or un-parks it.
+  // It was checked after, so a refused request had already woken the session up (found in review,
+  // 2026-11-14). A refusal must end the request here: the createSession below would adopt the id.
+  let storedForOther: Identity | undefined;
+  let session = sessionId
+    ? await resolveSession(sessionId, {
+      resumeArchived: true,
+      admit: (found) => {
+        storedForOther = ownerRefused(found);
+        return storedForOther === undefined;
+      },
+    })
+    : undefined;
+  if (storedForOther) {
+    refuse(storedForOther);
+    return;
   }
 
   // No session has the id, so the createSession below would adopt it. Under multi-user auth only an
@@ -346,11 +358,16 @@ export async function handleAguiStream(
     let textStarted = false;
     let streamedMeaningfulText = false;
 
-    const turnResult = await runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: runId }, () => runTurn({
+    // The caller's role rides the context too: runTurn takes the session's own first, and this one
+    // for a session that holds none (one this stream resumed rather than created).
+    const turnResult = await runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: runId, ...(caller?.role ? { callerRole: caller.role } : {}) }, () => runTurn({
       session,
       userMessage: message,
       userWords: message,
       signal: abortController.signal,
+      // Who asks for this turn's tool calls: the caller of this request, who is not the session's
+      // owner when an admin drives another account's session (tools/registry.ts approveUnderPolicy).
+      sender: () => ({ ...(callerWho ? { identity: callerWho } : {}), ...(caller?.role ? { role: caller.role } : {}) }),
       // Keep the gateway's hard timeout in lockstep with the runtime's delegation-wait
       // exclusion. Without this the two clocks disagree and the shorter one wins.
       onDelegationWaitMs: extendGatewayDeadline,

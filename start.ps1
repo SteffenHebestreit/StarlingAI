@@ -72,6 +72,12 @@ if ($rag -match '^(1|true|yes|on)$') {
   if ($hasGpu) { $composeFiles += @("-f", "docker-compose.gpu.yml"); Ok "Document-RAG enabled — GPU detected (reranker on GPU)" }
   else { Ok "Document-RAG enabled — no GPU, reranker on CPU" }
 }
+# A docker-compose.override.yml goes last (as in scripts/compose-files.mjs): Compose reads it on
+# its own only when it is given no -f.
+if (Test-Path -LiteralPath "docker-compose.override.yml" -PathType Leaf) {
+  $composeFiles += @("-f", "docker-compose.override.yml")
+  Ok "docker-compose.override.yml found - loaded last, after docker-compose.yml"
+}
 
 # Host path for sandbox/sub-container bind mounts (mirrors scripts/sai.mjs).
 $env:SAI_WORKSPACE_MOUNT_SOURCE = $PSScriptRoot

@@ -77,6 +77,7 @@ function writeTempConfig(
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-tool-list-stability-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     ...(orchestration ? { orchestration } : {}),
     ...(model ? { agents: { defaults: { model } } } : {}),
     subAgents: {

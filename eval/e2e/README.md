@@ -26,9 +26,9 @@ personal data, real credentials or real mail addresses in any scenario or fixtur
 
    | File (all git-ignored) | Content |
    |---|---|
-   | `config/gateway/31-e2e.local.jsonc` | `{ auth: { users: [eval (operator), eval-viewer (viewer)] } }` — bcrypt hashes from the gateway's own `hashPassword`, and each account's immutable `id`, without which it cannot sign in; a re-run gives an account it finds without one an id and keeps its password; nothing else of `auth` is touched |
+   | `config/gateway/31-e2e.local.jsonc` | `{ auth: { users: [eval (operator), eval-viewer (viewer), eval-peer (operator)] } }` — bcrypt hashes from the gateway's own `hashPassword`, and each account's immutable `id`, without which it cannot sign in; a re-run gives an account it finds without one an id and keeps its password, and adds an account the file lacks (`eval-peer`, to a file from before it) beside the others as they are; nothing else of `auth` is touched |
    | `eval/e2e/.credentials.local.json` | the plaintext passwords (32 random characters) the harness logs in with |
-   | `config/mail/accounts.d/00-e2e-isolation.json5` | `{ accounts: [], isolatedUsers: ["eval", "eval-viewer"] }` — the mail-service withholds every **shared** mail account (one without `allowedUsers`) from both identities, so an eval turn never reaches your real mailboxes |
+   | `config/mail/accounts.d/00-e2e-isolation.json5` | `{ accounts: [], isolatedUsers: ["eval", "eval-viewer", "eval-peer"] }` — the mail-service withholds every **shared** mail account (one without `allowedUsers`) from every eval identity, so an eval turn never reaches your real mailboxes |
 
    Config arrays replace each other when shards merge, so setup **refuses, writing nothing,** while another
    shard (or `workspace/runtime/runtime.overrides.json`) defines `auth.users` — it says which file and how to
@@ -63,7 +63,7 @@ later turn of the account through the durable-facts capsule, so one scenario's f
 `--concurrency 1` (the default) the attempt's identity — and the identity of any turn with `as` — loses every
 user- and workspace-scope memory entry, and its user model (`recall_context` serves it too), before the
 attempt starts. A scenario therefore cannot rely on what an earlier one stored; one that needs a record
-stores it itself (the viewer-isolation scenario: a turn as `eval`, then one `as: "eval-viewer"`).
+stores it itself (the isolation scenario: a turn as `eval`, then one `as: "eval-peer"`).
 Concurrent attempts share the account, so then nothing is reset. `--keep-memory` keeps it, and the
 account's `generated/` files with it (below).
 
@@ -74,12 +74,14 @@ attempt's notes in the report say what it left and why:
   stopped turn) — with auth off every account's memory is the shared single-operator store, and a token
   from before the switch still works;
 - the identity logs in as its own eval account (`GET /api/auth/me`: `eval` → `eval`, `eval-viewer` →
-  `eval-viewer`) — a credentials file may map it to any account;
+  `eval-viewer`, `eval-peer` → `eval-peer`) — a credentials file may map it to any account;
 - no other eval account lists the same entries — a gateway older than the per-user workspace routes
   (5fc9a8e) keeps workspace memory in one store for every account.
 
 `eval-viewer`'s memory and user model cannot be emptied through the API: every mutating route is
-operator-only, so its deletes are refused (`HTTP 403`, noted), while a viewer turn can still store memory.
+operator-only, so its deletes are refused (`HTTP 403`, noted). Nothing new lands there: the gateway runs no
+turn for a viewer (its `session.create` and `chat.send` over the socket are refused), so a scenario that
+needs a second account to chat uses `eval-peer`.
 A listing or a delete that fails is noted too.
 
 A deleted entry's MemGraph node goes with it, so the "Critical Memory" block cannot inject it any more.
@@ -120,7 +122,7 @@ account's own state (its memory among it) outside the root, where this reset nev
 reset above empties the memory.
 
 The route is operator-only, like every mutating route, so `eval-viewer`'s `generated/` is not emptied
-(`HTTP 403`, noted); no scenario has a viewer turn that writes a file. A reset that fails is noted, and the
+(`HTTP 403`, noted); a viewer runs no turn, so nothing writes a file there. A reset that fails is noted, and the
 attempt runs: the files left are a confound the report names, not a verdict, and a gateway built before the
 route answers `HTTP 404` (noted as such) for every attempt.
 
@@ -233,7 +235,7 @@ slip of the model under `--auto` would deploy a live tool that no route removes.
 
 | Kind | What it does |
 |---|---|
-| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `as` runs the turn as another identity, in that identity's own session — e.g. store something as `eval`, then check as `eval-viewer` in the same attempt. `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
+| `turn` | `chat.send` into the attempt's current session (created on first use, channel `eval`). `as` runs the turn as another identity, in that identity's own session — e.g. store something as `eval`, then check as `eval-peer` in the same attempt. Not as `eval-viewer`: the gateway refuses a viewer `session.create` and `chat.send`, and the attempt ends as a harness error. `agent` appends `--agent <name>`; `effort` is the message's effort tier; `attachments` (paths under [`fixtures/`](fixtures/)) are uploaded into the session and attached as the web client does (images also get their vision analysis inlined); `timeoutMs` (default 10 min) cancels the turn when it passes. Inline flags work as in the dashboard — the harness answers no approval or question card, so add `--auto` where a turn must not wait for one. |
 | `http` | A gateway request as the scenario identity, or `as`. `{sessionId}` in `path` is the scenario identity's current session. Without `expect.status` any 2xx passes; `bodyIncludes` is case-sensitive. |
 | `wait` | Sleeps `ms`. Keeps the previous turn's event window open (below). |
 | `newSession` | Later turns run in a fresh session of their identity. |

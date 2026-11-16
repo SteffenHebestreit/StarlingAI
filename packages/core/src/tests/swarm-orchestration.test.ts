@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SwarmState } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
@@ -35,6 +35,14 @@ vi.mock("../agent/sub-agent.js", () => ({
 
 describe("swarm orchestration tools", () => {
   const tempDirs: string[] = [];
+  // The workspace of a test that writes no config of its own: a delegation reads the promoted agents
+  // and the outcomes ledger from its tool context's workspace.
+  let testWorkspace = "";
+
+  beforeEach(() => {
+    testWorkspace = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-workspace-"));
+    tempDirs.push(testWorkspace);
+  });
 
   afterEach(async () => {
     for (const dir of tempDirs.splice(0)) {
@@ -98,7 +106,7 @@ describe("swarm orchestration tools", () => {
       task: "Find API docs",
     }, {
       sessionId: "session-1",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -129,7 +137,7 @@ describe("swarm orchestration tools", () => {
       sessionId,
       taskId,
       taskSignature: "collect docs::collect docs::",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
     }, 5_000);
     expect(lease).not.toBeNull();
 
@@ -145,7 +153,7 @@ describe("swarm orchestration tools", () => {
         taskId,
         taskTitle: task,
         task,
-      }, { sessionId, workspacePath: "/workspace", swarmState });
+      }, { sessionId, workspacePath: testWorkspace, swarmState });
 
       // success:false — a contended task with NO published winner result must not
       // let task graphs or parallel slices record a completion.
@@ -171,7 +179,7 @@ describe("swarm orchestration tools", () => {
         taskId,
         taskTitle: task,
         task,
-      }, { sessionId, workspacePath: "/workspace", swarmState });
+      }, { sessionId, workspacePath: testWorkspace, swarmState });
       expect(followed.success).toBe(true);
       expect(followed.output).toContain("winner's collected docs");
       expect(followed.metadata?.["followedWinnerResult"]).toBe(true);
@@ -239,7 +247,7 @@ describe("swarm orchestration tools", () => {
       task: "Ermittle die aktuellen Top-Headlines von heute.",
     }, {
       sessionId: "session-exit-code-fallback",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState: {
         objective: "Fetch headlines",
         startedAt: new Date().toISOString(),
@@ -260,6 +268,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -313,7 +322,7 @@ describe("swarm orchestration tools", () => {
       routingQuery: "A2A protocol official specification primary sources",
     }, {
       sessionId: "session-memory-reuse",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -407,6 +416,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         researcher: {
@@ -465,6 +475,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         image_sourcer: {
@@ -513,6 +524,7 @@ describe("swarm orchestration tools", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         researcher: {
@@ -567,6 +579,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -607,7 +620,7 @@ describe("swarm orchestration tools", () => {
       task: "Find API docs",
     }, {
       sessionId: "session-invalid-fallback",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState: {
         objective: "Find API docs",
         startedAt: new Date().toISOString(),
@@ -628,6 +641,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -685,7 +699,7 @@ describe("swarm orchestration tools", () => {
       routingQuery: "MCP official sources protocol research",
     }, {
       sessionId: "session-unknown-explicit",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -704,6 +718,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -775,7 +790,7 @@ describe("swarm orchestration tools", () => {
       ],
     }, {
       sessionId: "session-parallel-unknown-explicit",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -796,6 +811,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -866,7 +882,7 @@ describe("swarm orchestration tools", () => {
       ],
     }, {
       sessionId: "session-parallel-ids",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -883,7 +899,7 @@ describe("swarm orchestration tools", () => {
       ],
     }, {
       sessionId: "session-parallel-ids",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -926,7 +942,7 @@ describe("swarm orchestration tools", () => {
       task: "Plan a scoped maintenance task.",
     }, {
       sessionId: "session-allowed-scope",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
       allowedAgents: ["project_planner", "coder"],
     });
@@ -947,6 +963,7 @@ describe("swarm orchestration tools", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         browser_agent: {
@@ -1043,7 +1060,7 @@ describe("swarm orchestration tools", () => {
       task: "Plan nested specialist work.",
     }, {
       sessionId: "session-shared-budget",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
       onSwarmState,
       _turnAgentCounts: sharedCounts,
@@ -1066,6 +1083,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: {
@@ -1198,7 +1216,7 @@ describe("swarm orchestration tools", () => {
       task: "Find official Model Context Protocol sources",
     }, {
       sessionId: "session-empty-output",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -1278,7 +1296,7 @@ describe("swarm orchestration tools", () => {
       task: "Research how StarlingAI can improve itself",
     }, {
       sessionId: "session-placeholder-output",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -1358,7 +1376,7 @@ describe("swarm orchestration tools", () => {
       task: "Research exact microphone specs, reviews, known issues, pricing, and availability.",
     }, {
       sessionId: "session-planning-fetch-output",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -1383,6 +1401,7 @@ describe("swarm orchestration tools", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         code_analyst: {
@@ -1453,6 +1472,7 @@ describe("swarm orchestration tools", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "mock-model" } } },
       subAgents: {
         researcher: { description: "Research.", tools: ["web_search", "web_fetch", "write_file", "edit_file"], maxIterations: 4 },
@@ -1505,7 +1525,7 @@ describe("swarm orchestration tools", () => {
     const configPath = join(tempDir, "starlingai.json");
     // A catalog that holds agent_architect names it as the architect, in place of the built-in one.
     const architect = "agent_architect" in subAgents ? { ephemeralGeneration: { architectAgentName: "agent_architect" } } : {};
-    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "mock-model" } }, ...architect }, subAgents }), "utf8");
+    writeFileSync(configPath, JSON.stringify({ workspacePath: tempDir, agents: { defaults: { model: { primary: "mock-model" } }, ...architect }, subAgents }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
     vi.resetModules();
     return tempDir;
@@ -2073,7 +2093,7 @@ describe("swarm orchestration tools", () => {
       task: "List all running Docker containers on the n8n server using docker ps.",
     }, {
       sessionId: "session-shell-planning-only",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState: {
         objective: "List n8n server containers",
         startedAt: new Date().toISOString(),
@@ -2221,7 +2241,7 @@ describe("swarm orchestration tools", () => {
       task: "Type Hello World into the visible Copilot chat input.",
     }, {
       sessionId: "session-sessionid-chatter",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2299,7 +2319,7 @@ describe("swarm orchestration tools", () => {
       task: "Type Hello World into the visible chat input.",
     }, {
       sessionId: "session-max-iterations",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2340,7 +2360,7 @@ describe("swarm orchestration tools", () => {
       ],
     }, {
       sessionId: "session-2",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2353,7 +2373,7 @@ describe("swarm orchestration tools", () => {
 
     const stateResult = await getSwarmState!.execute({}, {
       sessionId: "session-2",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2374,7 +2394,7 @@ describe("swarm orchestration tools", () => {
       context: "[EARLIER IN THIS CONVERSATION — the exchange before this request]\nRequest: Hallo",
     }, {
       sessionId: "session-dispatch-documents",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
       delegationDocuments: "[DOCUMENT CONTEXT]\numsatz-q3-2026.csv\nJul;Nord;18432",
     });
@@ -2400,7 +2420,7 @@ describe("swarm orchestration tools", () => {
         ],
       }, {
         sessionId: "session-node-runs",
-        workspacePath: "/workspace",
+        workspacePath: testWorkspace,
         swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
       });
 
@@ -2443,7 +2463,7 @@ describe("swarm orchestration tools", () => {
 
       const graphResult = await getTool("run_task_graph")!.execute({
         nodes: [{ id: "n1", agentName: "code_analyst", task: "Which PDF library should invoices.py use?" }],
-      }, { sessionId: "session-node-runs-carried", workspacePath: "/workspace", swarmState, signal: cancelled.signal });
+      }, { sessionId: "session-node-runs-carried", workspacePath: testWorkspace, swarmState, signal: cancelled.signal });
 
       expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
       expect(graphResult.metadata?.["failed"]).toEqual(["n1"]);
@@ -2464,7 +2484,7 @@ describe("swarm orchestration tools", () => {
         ],
       }, {
         sessionId: "session-slice-agents",
-        workspacePath: "/workspace",
+        workspacePath: testWorkspace,
         swarmState: { objective: "Initial", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
       });
 
@@ -2498,7 +2518,7 @@ describe("swarm orchestration tools", () => {
       task: "Find official MCP specification",
     }, {
       sessionId: "session-3",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2507,7 +2527,7 @@ describe("swarm orchestration tools", () => {
       task: "Find official MCP specification",
     }, {
       sessionId: "session-3",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2566,13 +2586,13 @@ describe("swarm orchestration tools", () => {
 
     const first = await runTaskGraph!.execute(graphArgs, {
       sessionId: "session-graph-reuse",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
     const second = await runTaskGraph!.execute(graphArgs, {
       sessionId: "session-graph-reuse",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2627,13 +2647,13 @@ describe("swarm orchestration tools", () => {
 
     const first = await delegate!.execute(args, {
       sessionId: "session-repeat-failure",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
     const second = await delegate!.execute(args, {
       sessionId: "session-repeat-failure",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2651,6 +2671,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -2716,7 +2737,7 @@ describe("swarm orchestration tools", () => {
       task: "Find citation-grade primary sources for MCP.",
     }, {
       sessionId: "session-explicit-retry",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -2725,7 +2746,7 @@ describe("swarm orchestration tools", () => {
       task: "Find citation-grade primary sources for MCP.",
     }, {
       sessionId: "session-explicit-retry",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 
@@ -2786,7 +2807,7 @@ describe("swarm orchestration tools", () => {
       task: "Access the remote Windows machine at IP 192.0.2.10.",
     }, {
       sessionId: "session-explicit-agent-failure",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2841,7 +2862,7 @@ describe("swarm orchestration tools", () => {
       ],
     }, {
       sessionId: "session-browser-graph",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -2933,7 +2954,7 @@ describe("swarm orchestration tools", () => {
       task: "Write the protocol comparison paper.",
     }, {
       sessionId: "session-artifact-partial",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -3030,7 +3051,7 @@ describe("swarm orchestration tools", () => {
       task: "Write the protocol comparison paper.",
     }, {
       sessionId: "session-artifact-context",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -3042,7 +3063,7 @@ describe("swarm orchestration tools", () => {
       task: "Review the generated protocol comparison paper and decide whether one corrective pass is needed.",
     }, {
       sessionId: "session-artifact-context",
-      workspacePath: "/workspace",
+      workspacePath: testWorkspace,
       swarmState,
     });
 
@@ -3058,6 +3079,7 @@ describe("swarm orchestration tools", () => {
 
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "mock-model" },
@@ -3148,7 +3170,7 @@ describe("swarm orchestration tools", () => {
       task: "Research the top 3 most critical CVEs released in the last 30 days.",
     }, {
       sessionId: "session-security-partial",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       swarmState,
     });
 

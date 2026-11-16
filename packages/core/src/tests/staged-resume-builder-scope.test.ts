@@ -75,6 +75,7 @@ async function run(params: {
 }): Promise<void> {
   const configPath = join(params.workspace, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: params.workspace,
     orchestration: { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
     subAgents: {
       [params.agent]: {
@@ -167,6 +168,7 @@ describe("resume evidence belongs to the runs that build the artifact", () => {
     workspace = mkdtempSync(join(tmpdir(), "sai-resume-scope-"));
     const configPath = join(workspace, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: workspace,
       orchestration: { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
       subAgents: {
         content_writer: { description: "w", systemPrompt: "You do your job.", tools: DECK_BUILDER_TOOLS, maxIterations: 10, turnTimeoutMs: 60_000 },
@@ -268,6 +270,7 @@ describe("resume evidence belongs to the runs that build the artifact", () => {
     let call = 0;
     const configPath = join(workspace, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: workspace,
       subAgents: { researcher: { description: "r", systemPrompt: "You do your job.", tools: RESEARCHER_TOOLS, maxIterations: 10, turnTimeoutMs: 60_000 } },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;

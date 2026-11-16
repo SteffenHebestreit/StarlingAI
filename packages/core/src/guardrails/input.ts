@@ -153,8 +153,13 @@ const SUSPICIOUS_REPETITION_THRESHOLD = 50; // same char repeated > N times
  *   credential-extraction heuristic). Length and repetition limits still apply,
  *   and every execution-layer guardrail (tool tiers, approval gates, output
  *   redaction) remains fully active when the workflow runs.
+ * @param opts.repetitionLimit  false leaves out the suspicious-repetition limit (a run
+ *   of more than 50 identical characters), a heuristic for a padded message that a
+ *   code banner or a markdown table rule trips as well. For a value screened on its
+ *   own before it becomes part of a larger text (guardrails/workflow-params.ts). The
+ *   length limit still applies: it also bounds what the pattern scan costs.
  */
-export function checkInput(input: string, opts?: { trusted?: boolean }): GuardrailResult {
+export function checkInput(input: string, opts?: { trusted?: boolean; repetitionLimit?: boolean }): GuardrailResult {
   const builtin = checkInputBuiltins(input, opts);
   if (!builtin.allowed) return builtin;
 
@@ -178,7 +183,7 @@ export function checkInput(input: string, opts?: { trusted?: boolean }): Guardra
   return builtin;
 }
 
-function checkInputBuiltins(input: string, opts?: { trusted?: boolean }): GuardrailResult {
+function checkInputBuiltins(input: string, opts?: { trusted?: boolean; repetitionLimit?: boolean }): GuardrailResult {
   const { promptInjectionBlock, maxInputLength } = getGuardrails();
 
   if (!input || input.trim().length === 0) {
@@ -201,7 +206,7 @@ function checkInputBuiltins(input: string, opts?: { trusted?: boolean }): Guardr
   const normalized = input.normalize("NFC");
 
   // Check for suspicious character repetition (padding attacks)
-  const maxRun = longestRun(normalized);
+  const maxRun = opts?.repetitionLimit === false ? 0 : longestRun(normalized);
   if (maxRun > SUSPICIOUS_REPETITION_THRESHOLD) {
     return {
       allowed: false,

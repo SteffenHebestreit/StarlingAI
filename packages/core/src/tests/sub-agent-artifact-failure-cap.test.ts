@@ -41,6 +41,7 @@ describe("artifact-persistence cross-tool thrash guard", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-artifact-cap-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         writer: { description: "Writer", systemPrompt: "Persist the deliverable.", tools: ["generate_document", "write_file"], maxIterations: 10 },
       },

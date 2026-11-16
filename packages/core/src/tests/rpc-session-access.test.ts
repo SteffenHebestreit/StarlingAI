@@ -1,7 +1,40 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const SESSION_STORE_DIR = vi.hoisted(() => {
+  // The session store resolves its path when the module loads; a temp one, not the source tree's.
+  const { mkdtempSync: mk } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir: tmp } = require("node:os") as typeof import("node:os");
+  const { join: j } = require("node:path") as typeof import("node:path");
+  const dir = mk(j(tmp(), "rpc-access-sessions-"));
+  process.env["SAI_SESSION_STORE"] = j(dir, "sessions.json");
+  return dir;
+});
+
+/** The durable session store (agent/session-redis.ts) as another gateway instance left it: records
+ *  this process has never loaded, by id. */
+const durableStore = vi.hoisted(() => new Map<string, string>());
+vi.mock("../agent/session-redis.js", async (importActual) => ({
+  ...(await importActual<typeof import("../agent/session-redis.js")>()),
+  loadSessionFromRedis: async (id: string) => durableStore.get(id) ?? null,
+}));
+
+/** The sessions chat.send started a turn on. The turn itself is not under test here. */
+const turnsStarted = vi.hoisted(() => [] as string[]);
+vi.mock("../agent/runtime.js", async (importActual) => ({
+  ...(await importActual<typeof import("../agent/runtime.js")>()),
+  runTurn: async (opts: { session: { id: string } }) => {
+    turnsStarted.push(opts.session.id);
+    return { response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+  },
+}));
+
+afterAll(() => {
+  delete process.env["SAI_SESSION_STORE"];
+  rmSync(SESSION_STORE_DIR, { recursive: true, force: true });
+});
 
 /**
  * RPC-3 (July 2026 review round 6): the WS RPC bridge must not let one
@@ -21,6 +54,8 @@ describe("rpc session-access isolation", () => {
   });
 
   afterEach(async () => {
+    durableStore.clear();
+    turnsStarted.length = 0;
     const session = await import("../agent/session.js");
     for (const active of session.getAllSessions()) session.endSession(active.id);
     const configLoader = await import("../config/loader.js");
@@ -160,6 +195,47 @@ describe("rpc session-access isolation", () => {
     await conn.handleMessage(JSON.stringify({ id: "create", method: "session.create", params: { sessionId: aliceRun } }));
     expect((responseFor(ws.sent, "create").payload as { sessionId: string }).sessionId).not.toBe(aliceRun);
     expect(session.getSessionRecord(aliceRun)).toBeUndefined();
+  });
+
+  it("checks the owner of a session only the durable store holds before chat.send drives it, and does not wake it", async () => {
+    // canAccessSession lets an id with no record in this process through, and chat.send then took
+    // the record the store handed back without asking whose it was: with several gateway
+    // instances, or a store this process has not loaded, one user drove another's chat.
+    const [{ RpcConnection }, session] = await Promise.all([
+      import("../gateway/rpc.js"),
+      import("../agent/session.js"),
+    ]);
+    const stored = (sessionId: string, extra: Record<string, unknown> = {}) => {
+      const record = new session.AgentSession({ sessionId, channel: "webchat", userId: "bob" }).toRecord();
+      durableStore.set(sessionId, JSON.stringify({ ...record, ...extra }));
+      return sessionId;
+    };
+    const live = stored("bob-on-another-instance");
+    // A chat the turn watchdog parked: resolveSession(resumeArchived) un-parks it in place.
+    const parked = stored("bob-parked-elsewhere", { archivedAt: new Date().toISOString(), archivedReason: "timeout" });
+
+    const aliceWs = mockWs();
+    const alice = new RpcConnection(aliceWs as never, "alice", "operator");
+    for (const sessionId of [live, parked]) {
+      await alice.handleMessage(JSON.stringify({ id: sessionId, method: "chat.send", params: { sessionId, message: "what did he ask you?" } }));
+      const refused = responseFor(aliceWs.sent, sessionId);
+      expect(refused.ok, sessionId).toBe(false);
+      // The bare message of every ownership denial: nothing about the session's fate.
+      expect(refused.error, sessionId).toBe(`Error: Session not found: ${sessionId}`);
+      // Neither hydrated into this process nor woken up.
+      expect(session.getSessionRecord(sessionId), sessionId).toBeUndefined();
+    }
+    expect(turnsStarted).toEqual([]);
+
+    // Its owner drives it, the parked one un-parked.
+    const bobWs = mockWs();
+    const bob = new RpcConnection(bobWs as never, "bob", "operator");
+    for (const sessionId of [live, parked]) {
+      await bob.handleMessage(JSON.stringify({ id: sessionId, method: "chat.send", params: { sessionId, message: "continue" } }));
+      expect(responseFor(bobWs.sent, sessionId).ok, sessionId).toBe(true);
+    }
+    expect(turnsStarted).toEqual([live, parked]);
+    expect(session.getSessionRecord(parked)?.isArchived()).toBe(false);
   });
 
   it("does not enforce isolation when the connection has no authenticated user (auth off)", async () => {

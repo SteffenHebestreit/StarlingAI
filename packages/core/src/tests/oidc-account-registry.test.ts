@@ -308,6 +308,37 @@ describe("an identity-provider subject owns one account", () => {
     expect(ok.error).toBeUndefined();
   });
 
+  it("maps nobody to a defaultRole that no loaded extension declares, and refuses a token whose role is no longer declared", async () => {
+    // A fork's lowest role as the default. Its extension not loaded, the default mapped to operator,
+    // so everyone the IdP granted no listed role signed in as an operator.
+    const { signIn, resolve, entries } = await boot(oidcAuth({ roleMapping: { admin: ["sai-admin"], defaultRole: "patient" } }));
+    const { _recordLoadedExtension, _resetExtensionsForTests } = await import("../extension/index.js");
+    try {
+      const refused = await signIn({ sub: "subject-1", preferred_username: "pia" });
+      expect(refused.token).toBeUndefined();
+      expect(refused.error).toBe("sso_failed");
+      expect(entries()).toEqual([]);
+
+      // The extension loads: the default maps, and the account signs in with it.
+      const patient = { name: "patient", description: "a patient", rank: 10 };
+      _recordLoadedExtension(
+        { name: "praxis", version: "1", toolNames: [], auditEvents: [], roles: [patient], loadedAt: "", source: "test" },
+        { name: "praxis", version: "1", roles: [patient] },
+      );
+      const token = (await signIn({ sub: "subject-1", preferred_username: "pia" })).token!;
+      expect(await resolve(token)).toMatchObject({ username: "pia", role: "patient" });
+
+      // At the next boot the extension fails to load: the token's role is nobody's, and it is refused.
+      _resetExtensionsForTests();
+      expect(await resolve(token)).toBeNull();
+      // A person the IdP grants a listed role signs in as before.
+      const admin = (await signIn({ sub: "subject-2", preferred_username: "ann", realm_access: { roles: ["sai-admin"] } })).token!;
+      expect(await resolve(admin)).toMatchObject({ username: "ann", role: "admin" });
+    } finally {
+      _resetExtensionsForTests();
+    }
+  });
+
   it("resolves an identity-provider token only while the provider is oidc", async () => {
     const { signIn, resolve, loader } = await boot();
     const token = (await signIn({ sub: "subject-1", preferred_username: "fred" })).token!;

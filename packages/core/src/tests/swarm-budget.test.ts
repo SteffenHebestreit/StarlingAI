@@ -49,11 +49,13 @@ describe("swarm budget tracking", () => {
     await memory.resetSharedMemoryForTests();
   });
 
+  /** Writes the test's config into a temp dir of its own, which is also its workspace; returns the dir. */
   function writeConfig(extra: Record<string, unknown> = {}): string {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-budget-"));
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: { model: { primary: "mock-model" } },
         ...extra,
@@ -69,11 +71,11 @@ describe("swarm budget tracking", () => {
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
     vi.resetModules();
-    return configPath;
+    return tempDir;
   }
 
   it("propagates token usage, tool count, duration to swarm task attempts", async () => {
-    writeConfig();
+    const workspacePath = writeConfig();
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => makeStats(args));
 
     const [{ getTool }] = await Promise.all([
@@ -90,7 +92,7 @@ describe("swarm budget tracking", () => {
 
     await getTool("delegate_to_agent")!.execute(
       { agentName: "researcher", task: "Find docs" },
-      { sessionId: "s-budget-1", workspacePath: "/workspace", swarmState },
+      { sessionId: "s-budget-1", workspacePath, swarmState },
     );
 
     const tasks = Object.values(swarmState.tasks);
@@ -114,7 +116,7 @@ describe("swarm budget tracking", () => {
   }, 30_000);
 
   it("flags budgetExceeded when token cap is breached", async () => {
-    writeConfig({ budgets: { maxTokensPerTask: 100 } });
+    const workspacePath = writeConfig({ budgets: { maxTokensPerTask: 100 } });
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => makeStats(args));
 
     const [{ getTool }] = await Promise.all([
@@ -128,7 +130,7 @@ describe("swarm budget tracking", () => {
 
     await getTool("delegate_to_agent")!.execute(
       { agentName: "researcher", task: "Find docs" },
-      { sessionId: "s-budget-2", workspacePath: "/workspace", swarmState },
+      { sessionId: "s-budget-2", workspacePath, swarmState },
     );
 
     const attempt = Object.values(swarmState.tasks)[0]!.attempts[0]!;
@@ -137,7 +139,7 @@ describe("swarm budget tracking", () => {
   }, 30_000);
 
   it("flags budgetExceeded when toolCalls cap is breached", async () => {
-    writeConfig({ budgets: { maxToolCallsPerTask: 1 } });
+    const workspacePath = writeConfig({ budgets: { maxToolCallsPerTask: 1 } });
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => makeStats(args));
 
     const [{ getTool }] = await Promise.all([
@@ -151,7 +153,7 @@ describe("swarm budget tracking", () => {
 
     await getTool("delegate_to_agent")!.execute(
       { agentName: "researcher", task: "Do many things" },
-      { sessionId: "s-budget-3", workspacePath: "/workspace", swarmState },
+      { sessionId: "s-budget-3", workspacePath, swarmState },
     );
 
     const attempt = Object.values(swarmState.tasks)[0]!.attempts[0]!;
@@ -160,7 +162,7 @@ describe("swarm budget tracking", () => {
   }, 30_000);
 
   it("does not flag budgets when configured caps are zero (unset)", async () => {
-    writeConfig({ budgets: { maxTokensPerTask: 0, maxToolCallsPerTask: 0, maxDurationMsPerTask: 0 } });
+    const workspacePath = writeConfig({ budgets: { maxTokensPerTask: 0, maxToolCallsPerTask: 0, maxDurationMsPerTask: 0 } });
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => makeStats(args, {
       usage: { promptTokens: 1_000_000, completionTokens: 1_000_000, totalTokens: 2_000_000 },
       toolCount: 9999,
@@ -177,7 +179,7 @@ describe("swarm budget tracking", () => {
 
     await getTool("delegate_to_agent")!.execute(
       { agentName: "researcher", task: "Burn budget" },
-      { sessionId: "s-budget-4", workspacePath: "/workspace", swarmState },
+      { sessionId: "s-budget-4", workspacePath, swarmState },
     );
 
     const attempt = Object.values(swarmState.tasks)[0]!.attempts[0]!;
@@ -186,7 +188,7 @@ describe("swarm budget tracking", () => {
   }, 30_000);
 
   it("get_swarm_budget aggregates totals and per-agent breakdown", async () => {
-    writeConfig({ budgets: { maxTokensPerTask: 1000 } });
+    const workspacePath = writeConfig({ budgets: { maxTokensPerTask: 1000 } });
 
     let call = 0;
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => {
@@ -206,7 +208,7 @@ describe("swarm budget tracking", () => {
       objective: "Aggregate test", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {},
     };
 
-    const ctx = { sessionId: "s-budget-agg", workspacePath: "/workspace", swarmState };
+    const ctx = { sessionId: "s-budget-agg", workspacePath, swarmState };
 
     await getTool("delegate_to_agent")!.execute({ agentName: "researcher", task: "first" }, ctx);
     await getTool("delegate_to_agent")!.execute({ agentName: "researcher", task: "second" }, ctx);
@@ -242,7 +244,7 @@ describe("swarm budget tracking", () => {
   }, 30_000);
 
   it("formatSwarmState (via get_swarm_state) shows totals and budget flags", async () => {
-    writeConfig({ budgets: { maxTokensPerTask: 100 } });
+    const workspacePath = writeConfig({ budgets: { maxTokensPerTask: 100 } });
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions) => makeStats(args));
 
     const [{ getTool }] = await Promise.all([
@@ -253,7 +255,7 @@ describe("swarm budget tracking", () => {
     const swarmState: SwarmState = {
       objective: "render test", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {},
     };
-    const ctx = { sessionId: "s-budget-render", workspacePath: "/workspace", swarmState };
+    const ctx = { sessionId: "s-budget-render", workspacePath, swarmState };
 
     await getTool("delegate_to_agent")!.execute({ agentName: "researcher", task: "do" }, ctx);
 

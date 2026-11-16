@@ -22,13 +22,22 @@ vi.mock("node:child_process", () => {
 });
 
 // The sandbox creates the caller's root and its state directory on the gateway side before a
-// run. These are compose-layout paths, which on this machine are not the gateway's (on Windows
-// "/workspace" is the root of the current drive), so nothing is created for them here.
+// run, and on Linux reads the bound directory's owner for the container's --user. These are
+// compose-layout paths, which on this machine are not the gateway's (on Windows "/workspace" is
+// the root of the current drive), so nothing is created for them here, and none has an owner: it
+// is not there, as on a Linux runner.
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
+  const isComposePath = (path: unknown): boolean => /^\/workspace(\/|$)/.test(String(path).replace(/\\/g, "/"));
   const mkdirSync = ((path: Parameters<typeof real.mkdirSync>[0], options?: Parameters<typeof real.mkdirSync>[1]) =>
-    /^\/workspace(\/|$)/.test(String(path).replace(/\\/g, "/")) ? undefined : real.mkdirSync(path, options)) as typeof real.mkdirSync;
-  return { ...real, mkdirSync, default: { ...real, mkdirSync } };
+    isComposePath(path) ? undefined : real.mkdirSync(path, options)) as typeof real.mkdirSync;
+  const statSync = ((path: Parameters<typeof real.statSync>[0], options?: Parameters<typeof real.statSync>[1]) => {
+    if (isComposePath(path)) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, stat '${String(path)}'`), { code: "ENOENT" });
+    }
+    return real.statSync(path, options);
+  }) as typeof real.statSync;
+  return { ...real, mkdirSync, statSync, default: { ...real, mkdirSync, statSync } };
 });
 
 // A per-user workspace path in the compose layout, and a host-path mount source for it.

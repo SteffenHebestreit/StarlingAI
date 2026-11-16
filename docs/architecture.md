@@ -210,7 +210,7 @@ The current `v0.45.8` codebase implements the swarm vision through **Stage 13** 
 | **Token-by-token streaming** | 6 | Implemented | True streaming via `provider.stream()`; embedding query cache for semantic routing |
 | **Multimodal tools** | 7 | Implemented | `extract_file_content`, `transcribe_audio`, `synthesize_speech`, `list_tts_voices`, `analyze_image` |
 | **Browser tools** | 7 | Implemented | `browser_navigate`, `browser_snapshot`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_select_option`, `browser_screenshot` (Playwright MCP wrappers) |
-| **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; one-click HTTP callbacks; WebSocket `approval.respond` RPC |
+| **Human-in-the-loop approvals** | 7 | Implemented | Slack Block Kit, outbound webhook, sync webhook; per-scene `humanInLoopSteps`; HTTP callback links with a confirmation page; WebSocket `approval.respond` RPC |
 | **Intervention diagnostics** | 7 | Implemented | `classifyToolIntervention()` with 9 categories; streamed to WebSocket as `intervention` events |
 | **Default tool registry** | 7 | Implemented | `ALWAYS_AVAILABLE_MAIN_TOOL_NAMES` (22) + `DIRECT_MAIN_TOOL_NAMES` (52) + `ORCHESTRATION_TOOL_NAMES` (13), in `agent/default-tools.ts` |
 | **Standalone scene worker** | 7 | Implemented | `pnpm --filter @starlingai/core worker:scene` runs queued scene jobs outside the gateway process; set `SAI_DISABLE_EMBEDDED_SCENE_WORKER=1` on the gateway when splitting processes |
@@ -280,7 +280,7 @@ The current `v0.45.8` codebase implements the swarm vision through **Stage 13** 
 ┌────────────────────────▼────────────────────────────────────────────┐
 │  Approval gate  (packages/core/src/approval/)                        │
 │  humanInLoopSteps check → Slack / outbound-webhook / sync-webhook   │
-│  approval store  ·  one-click HTTP callback  ·  WS approval.respond │
+│  approval store  ·  two-click HTTP callback  ·  WS approval.respond │
 └────────────────────────┬────────────────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────────────────┐

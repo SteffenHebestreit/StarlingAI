@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { childLogger } from "../logger.js";
 import type { Identity } from "./accounts.js";
 import { multiUserAuthActive, ownsRecord } from "./user-scope.js";
+import { policyAdmitsRole } from "../gateway/route-policies.js";
 
 const log = childLogger("runtime:notifications");
 const MAX_RECENT_NOTIFICATIONS = 100;
@@ -21,10 +22,16 @@ export interface RuntimeNotification {
   sticky?: boolean;
   /**
    * Whose notification this is. One with an owner is forwarded to that owner's connections only
-   * (gateway/rpc.ts) and the field itself never leaves the gateway; one without goes to everybody
-   * signed in, as all of them did.
+   * (gateway/rpc.ts) and the field itself never leaves the gateway; under multi-user auth one
+   * without goes to operators and above (notificationForCaller).
    */
   owner?: Identity;
+  /**
+   * The roles it is for (policyAdmitsRole: a listed name, and among the built-in roles every higher
+   * one): one with an audience goes only to connections whose role it admits, never to one whose
+   * role is not known. Like `owner`, the field never leaves the gateway. Unset: everybody, as before.
+   */
+  audienceRoles?: readonly string[];
 }
 
 export interface PublishNotificationInput {
@@ -39,6 +46,7 @@ export interface PublishNotificationInput {
   targetPath?: string;
   sticky?: boolean;
   owner?: Identity;
+  audienceRoles?: readonly string[];
 }
 
 type NotificationSubscriber = (notification: RuntimeNotification) => void;
@@ -59,6 +67,7 @@ export function publishNotification(input: PublishNotificationInput): RuntimeNot
     targetPath: input.targetPath?.trim() || undefined,
     sticky: input.sticky === true ? true : undefined,
     ...(input.owner ? { owner: input.owner } : {}),
+    ...(input.audienceRoles?.length ? { audienceRoles: [...input.audienceRoles] } : {}),
   };
 
   if (!notification.title || !notification.message) {
@@ -104,17 +113,33 @@ export function subscribeToNotifications(
 }
 
 /**
- * A notification as it is sent to a connection, or nothing when it is somebody else's. One with
- * an owner goes to that owner alone under multi-user auth (with one operator there is nobody else);
- * who it belongs to is never part of what is sent.
+ * A notification as it is sent to a connection, or nothing when it is not the caller's to see.
+ * One with an audience (`audienceRoles`, a routed approval's approvers) goes to a caller whose role
+ * it admits (`access.role`, the connection's), and to nobody whose role is not known. Otherwise, with
+ * one operator there is nobody else, and every notification goes out. Under multi-user auth:
+ *
+ * - One with an owner goes to that owner alone.
+ * - One with an audience and no owner goes to the roles it admits, whatever `access.seesUnowned`
+ *   says.
+ * - One with neither goes only to a caller for whom `access.seesUnowned` is set, which the gateway
+ *   sets for operators and above. Such a notification is about a run that names no account (a job a
+ *   scene trigger or an instance credential queued) and carries its job and session ids and its
+ *   error text. Every signed-in viewer received it.
+ *
+ * Who a notification belongs to and who it is for are never part of what is sent.
  */
 export function notificationForCaller(
   notification: RuntimeNotification,
   caller: Identity | undefined,
-): Omit<RuntimeNotification, "owner"> | undefined {
-  const { owner, ...wire } = notification;
-  if (owner && multiUserAuthActive() && !ownsRecord(caller, owner)) return undefined;
-  return wire;
+  access: { seesUnowned?: boolean; role?: string } = {},
+): Omit<RuntimeNotification, "owner" | "audienceRoles"> | undefined {
+  const { owner, audienceRoles, ...wire } = notification;
+  if (audienceRoles && !(access.role !== undefined && policyAdmitsRole({ roles: [...audienceRoles] }, access.role))) {
+    return undefined;
+  }
+  if (!multiUserAuthActive()) return wire;
+  if (owner) return ownsRecord(caller, owner) ? wire : undefined;
+  return audienceRoles || access.seesUnowned ? wire : undefined;
 }
 
 export function listRecentNotifications(limit = 20): RuntimeNotification[] {

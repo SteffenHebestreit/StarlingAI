@@ -86,6 +86,7 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
   const makeWorkspace = (orchestration?: Record<string, unknown>, seedMemory = true): string => {
     const dir = mkdtempSync(join(tmpdir(), "sai-prefix-"));
     writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+      workspacePath: dir,
       ...(orchestration ? { orchestration } : {}),
       subAgents: {
         [AGENT]: {

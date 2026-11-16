@@ -1017,8 +1017,7 @@
 
   "gateway": {
     "port": 8765,
-    "restPort": 8766,
-    "bindHost": "loopback",
+    "host": "127.0.0.1",
     "sessionTtlMs": 3600000,
     "turnTimeoutMs": 900000,
     "publicUrl": "https://starlingai.example.com"

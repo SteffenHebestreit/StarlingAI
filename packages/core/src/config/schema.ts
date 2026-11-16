@@ -351,12 +351,19 @@ export const EphemeralGenerationSchema = z.object({
 // moved to ./schemas/channels.ts; re-exported above.
 
 export const GatewaySchema = z.object({
-  // REST and the WebSocket share this one port. (`restPort` and `bindHost` used
-  // to live here; both were vestigial — nothing ever listened on a second port,
-  // and the listen address is hardcoded 0.0.0.0 inside the container while HOST
-  // exposure is set by SAI_BIND_HOST in docker-compose. A `bindHost: "loopback"`
-  // that does not bind loopback is worse than no knob at all.)
+  // REST and the WebSocket share this one port. (`restPort` used to live here;
+  // nothing ever listened on a second port.)
   port: z.number().int().min(1024).max(65535).default(8765),
+  // The address that port is bound to, by the gateway and by the maintenance boot. 127.0.0.1
+  // by default: a run outside Docker (`pnpm sai dev gateway`, the test suite) is reachable from
+  // this machine only. The gateway image sets SAI_GATEWAY_HOST=0.0.0.0, because inside the
+  // container Docker's port publish and the web container (http://gateway:8765) reach the
+  // gateway on the container's own interface; which HOST interface is published stays with
+  // SAI_BIND_HOST in docker-compose. Not "localhost": it resolves to ::1 first on Windows and
+  // many Linux hosts, and an IPv6-only bind refuses http://127.0.0.1. Binding 0.0.0.0 outside
+  // a container exposes the gateway to the network: only with auth.enabled. (The deleted
+  // `bindHost` enum never reached listen(); this does.)
+  host: z.string().trim().min(1).max(253).default("127.0.0.1"),
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
   // Hard ceiling for an interactive orchestrator turn. On expiry the turn is
@@ -380,6 +387,17 @@ export const GatewaySchema = z.object({
    *  container is NOT the mounted repo — the reason gateway-routed eval fixtures were
    *  invisible to agents. Deployments set this to the container mount (e.g. "/workspace"). */
   sessionWorkspaceRoot: z.string().optional(),
+  /** Who may waive human approval for a run they start. */
+  overrides: z.object({
+    /**
+     * The lowest role whose request to auto-approve a run's per-call approvals is honoured
+     * (chat.send's `--auto`, the legacy A2A route's `autoApprove`), compared by rank; "disabled"
+     * honours no one. Below it `--auto` is refused and starts no turn, and the legacy route ignores
+     * `autoApprove`, so approval-gated calls fail closed. Applies under `auth.enabled`; with auth off
+     * only "disabled" changes anything. Default "operator", the behaviour before the key.
+     */
+    autoApproveMinRole: z.enum(["viewer", "operator", "admin", "disabled"]).default("operator"),
+  }).prefault({}),
 });
 
 /**
@@ -395,9 +413,8 @@ export const GatewaySchema = z.object({
  * jobs, federation, and the swarm dashboard but cannot mutate persistent
  * state (no user management, no config edits, no cron-trigger creation).
  *
- * Wave C will extend the gate to WS chat (viewers will not be able to
- * initiate turns); for now viewers can chat like operators, they just
- * can't administer the deployment.
+ * The WebSocket RPC draws the same line per method (gateway/rpc-policy.ts):
+ * a viewer reads its own sessions there but starts no session and no turn.
  */
 /** Role names are open strings: upstream ships operator/viewer; core
  *  extensions register additional roles (the gateway validates against the
@@ -735,6 +752,11 @@ export const A2ASchema = z.object({
   taskTimeoutMs: z.number().int().min(5_000).max(3_600_000).default(600_000),
   /** Refresh interval in ms for re-fetching peer agent cards.  0 = once at startup. */
   refreshIntervalMs: z.number().int().min(0).max(86_400_000).default(900_000),
+  /**
+   * Serve the legacy in-process route `POST /a2a/agents/:name` (deprecated; use `/a2a/v1`).
+   * It is independent of `enabled`: true (default) keeps it as before, false answers 404.
+   */
+  legacyAgentRoute: z.boolean().default(true),
 });
 
 export type A2APeerConfig = z.infer<typeof A2APeerSchema>;
@@ -1039,7 +1061,7 @@ export type SubAgentConfig = z.infer<typeof SubAgentConfigSchema>;
 //   sync_webhook    — POST and expect { approved: boolean } in the response body
 
 /**
- * Slack — posts a Block Kit message with one-click Approve / Deny links
+ * Slack — posts a Block Kit message with Approve / Deny links (each opens a confirmation page)
  * via a Slack Incoming Webhook (no Slack app or interactive components required).
  * gateway.publicUrl must be set so StarlingAI can construct the link URLs.
  */
@@ -1053,7 +1075,7 @@ export const SlackApprovalChannelSchema = z.object({
 
 /**
  * Outbound webhook — POSTs a JSON approval request to any URL.
- * The payload contains pre-formed `approveUrl` and `denyUrl` one-click links
+ * The payload contains pre-formed `approveUrl` and `denyUrl` links (to a confirmation page)
  * plus a `callbackUrl` for programmatic POST-back.
  * Perfect for n8n → WhatsApp / email / SMS / any custom channel.
  * gateway.publicUrl must be set.
@@ -1396,11 +1418,22 @@ export const SceneConfigSchema = z.object({
   expectArtifact: z.boolean().optional(),
   /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
   triggers: WorkflowCatalogTriggersSchema,
-  /** Name of an entry in `approvalChannels` — used when this scene is triggered via webhook */
+  /** Name of an entry in `approvalChannels` — asked for this scene's approvals when it runs through REST, a webhook or a job, and for its humanInLoopSteps when a chat `/run` or `run_workflow` starts it */
   approvalChannel: z.string().optional(),
   /** Override the approval channel timeout for this scene (ms). Min 60 s, max 24 h.
    *  Falls back to the channel's own timeoutMs when not set. */
   approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
+});
+
+/**
+ * Per-call approvals of tools whose approval policy names who may grant them
+ * (guardrails/tool-tiers.ts ToolApprovalPolicy, approval/routed.ts).
+ */
+export const ApprovalsSchema = z.object({
+  /** How long a call routed to its approvers waits for one of them before it is denied (ms).
+   *  Min 60 s, max 24 h. Unset, gateway.approvalTimeoutMs applies, as for the requester's own card.
+   *  The wait holds the turn's clocks, so the turn's own timeout does not cut it short. */
+  routedTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
 });
 
 export const ScenesSchema = z.record(z.string(), SceneConfigSchema);
@@ -1896,6 +1929,18 @@ export const ConfigSchema = z.object({
     }).prefault({}),
     mainAssistant: MainAssistantConfigSchema.prefault({}),
     ephemeralGeneration: EphemeralGenerationSchema.prefault({}),
+    /**
+     * The lowest role that may run an agent with workspaceAccess "full" (the agents that maintain
+     * the deployment: they work from the shared root, edit agents/, scenes/ and jobs/ for every
+     * account and can read every account's root). Under multi-user auth a run whose role ranks
+     * below it is refused, whichever path reached the agent (delegate_to_agent, --agent,
+     * run_workflow, A2A, MCP, a queued job's or a scheduled run's turn, which answers to the role
+     * its account holds when it runs), and routing does not offer it those agents. A run with no
+     * known role (a channel, a cron trigger, a federation peer, an identity-provider account's
+     * queued run that carries none) is not refused by it; an extension's authorizeAgentRun hook can
+     * refuse those. Default "operator": operators and admins keep these agents, viewers do not.
+     */
+    fullScopeMinRole: z.enum(["viewer", "operator", "admin"]).default("operator"),
     /** When true, ALL sub-agents default to containerized execution (Docker isolation).
      *  Individual agents can opt out by setting container.disabled: true in their config.
      *  Defaults to true to align with the "every agent runs in an isolated container"
@@ -2109,6 +2154,7 @@ export const ConfigSchema = z.object({
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
+  approvals: ApprovalsSchema.prefault({}),
   infrastructure: InfrastructureSchema.prefault({}),
   monitoring: MonitoringSchema.prefault({}),
   sourceForge: SourceForgeSchema.prefault({}),

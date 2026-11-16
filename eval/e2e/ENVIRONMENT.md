@@ -67,7 +67,7 @@ agent mail tool (mail_search, mail_read, mail_prepare_draft, mail_send_draft, â€
 ```
 
 - The account is bound to the user `eval` (`allowedUsers`): no other user sees or uses it.
-- `isolatedUsers: ["eval", "eval-viewer"]` withholds every **shared** account (one without `allowedUsers`)
+- `isolatedUsers: ["eval", "eval-viewer", "eval-peer"]` withholds every **shared** account (one without `allowedUsers`)
   from the eval identities, so an eval turn can never read or send from the operator's real mailboxes â€”
   without it, `eval` would see every shared account of `config/mail/accounts.json`. `status` reports how many
   other accounts `eval` can see; it must be 0.

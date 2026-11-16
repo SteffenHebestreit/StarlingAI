@@ -166,7 +166,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useElementSize } from "@vueuse/core";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { writeClipboard } from "@/composables/clipboard";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -335,7 +335,7 @@ async function copyId(what: string, id: string): Promise<void> {
 }
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 async function loadSummary(run: number): Promise<void> {

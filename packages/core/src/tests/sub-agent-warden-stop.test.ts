@@ -75,6 +75,7 @@ async function runWithStormAtCall(stormAt: number, agent: Record<string, unknown
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-warden-stop-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     subAgents: {
       storm_agent: {
         description: "Warden stop test agent",
@@ -169,6 +170,7 @@ describe("the warden's emergency stop in the sub-agent loop", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-warden-dereg-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         storm_agent: { description: "Warden stop test agent", systemPrompt: "Do the task with your tools.", tools: ["grep_files"], maxIterations: 5, model: { contextWindow: 131_072 } },
       },

@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 
 export type AuthRole = "operator" | "viewer" | "admin";
 
@@ -32,7 +32,7 @@ export const useAuthStore = defineStore("auth", () => {
   const isViewer = computed(() => currentUser.value?.role === "viewer");
 
   function apiBase(): string {
-    return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+    return gatewayRestBaseUrl(gateway.wsUrl);
   }
 
   async function refreshCurrentUser(): Promise<void> {

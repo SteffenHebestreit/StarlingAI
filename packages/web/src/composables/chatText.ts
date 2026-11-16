@@ -412,9 +412,19 @@ export const chatText = {
   guardrailsLine: (l: TurnLanguage) => pick(l,
     "Guardrails active · All messages audited · Overrides:",
     "Guardrails aktiv · Alles wird protokolliert · Schalter:"),
+  // A viewer may read its chats but not send: the gateway refuses it every method that changes
+  // something, chat included. Said in the field, on Send, and under the composer.
+  viewerReadOnly: (l: TurnLanguage) => pick(l,
+    "Read-only — your role can read chats but not send messages",
+    "Nur lesen — deine Rolle kann Chats lesen, aber keine Nachrichten senden"),
+  // Why a session action the gateway would refuse this connection's role is greyed out.
+  notForYourRole: (l: TurnLanguage) => pick(l, "Not available to your role", "Für deine Rolle nicht verfügbar"),
 
   // ── The note under the field ──────────────────────────────────────────────────────────────
   notSent: (l: TurnLanguage, reason: string) => pick(l, `Not sent — ${reason}`, `Nicht gesendet — ${reason}`),
+  // The gateway refused the caller's role ("Forbidden: chat.send requires role operator"): an
+  // access matter, not an error to retry. `reason` is the gateway's words after "Forbidden:".
+  noAccess: (l: TurnLanguage, reason: string) => pick(l, `No access — ${reason}`, `Kein Zugriff — ${reason}`),
   couldNotStop: (l: TurnLanguage, reason: string) => pick(l,
     `Couldn't stop the turn — ${reason}`,
     `Die Aufgabe ließ sich nicht stoppen — ${reason}`),

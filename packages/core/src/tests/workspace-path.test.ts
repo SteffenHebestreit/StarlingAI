@@ -7,6 +7,35 @@ import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
 import * as configLoader from "../config/loader.js";
 
+// "a relative path that repeats the workspace root" takes the compose deployment's root apart,
+// /workspace/workspace as every sub-agent is told it, and the resolvers look at the disk while they do
+// (realpathSync, lstatSync). That root is not on the machine running the tests: a Linux runner has no
+// /workspace, and on Windows "/workspace" is the root of the current drive, which every checkout there
+// shares. So node:fs answers for its paths as a runner does, from nothing, whether they come resolved
+// or not, and the suite's workspace guard sees no call there. (All inside the factory: modules this
+// file imports call node:fs while they load, before anything below the imports exists.)
+vi.mock("node:fs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs")>();
+  const path = await import("node:path");
+  const norm = (p: unknown) => String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+  const roots = [...new Set(["/workspace", norm(path.resolve("/workspace"))])];
+  const isComposePath = (p: unknown) => roots.some((root) => norm(p) === root || norm(p).startsWith(`${root}/`));
+  /** `call`, except that a compose-layout path is not there (a stat with throwIfNoEntry: false answers undefined). */
+  const absentFor = <Call extends (...args: never[]) => unknown>(call: Call): Call =>
+    ((path: unknown, ...rest: unknown[]) => {
+      if (!isComposePath(path)) return (call as unknown as (...args: unknown[]) => unknown)(path, ...rest);
+      if ((rest[0] as { throwIfNoEntry?: boolean } | undefined)?.throwIfNoEntry === false) return undefined;
+      throw Object.assign(new Error(`ENOENT: no such file or directory '${String(path)}'`), { code: "ENOENT" });
+    }) as unknown as Call;
+  const spies = {
+    realpathSync: Object.assign(absentFor(real.realpathSync), { native: absentFor(real.realpathSync.native) }),
+    lstatSync: absentFor(real.lstatSync),
+    statSync: absentFor(real.statSync),
+    existsSync: (path: Parameters<typeof real.existsSync>[0]) => !isComposePath(path) && real.existsSync(path),
+  };
+  return { ...real, ...spies, default: { ...real, ...spies } };
+});
+
 const WS = resolve("/tmp/ws");
 
 describe("resolveWorkspaceWritePath", () => {

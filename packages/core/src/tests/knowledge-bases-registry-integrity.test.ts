@@ -19,12 +19,23 @@ const renameControl = vi.hoisted(() => ({
   calls: 0,
   readRefusals: 0,
 }));
+// A temp-file write a test can cut short: part of the text lands, then the disk is full.
+const writeControl = vi.hoisted(() => ({ cutTempWrites: 0 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const rename = (from: string, to: string): Promise<void> => {
     renameControl.calls += 1;
     return renameControl.impl ? renameControl.impl(from, to, actual.rename) : actual.rename(from, to);
   };
+  const writeFile = (async (...args: Parameters<typeof actual.writeFile>) => {
+    if (writeControl.cutTempWrites > 0 && String(args[0]).endsWith(".tmp")) {
+      writeControl.cutTempWrites -= 1;
+      const text = String(args[1]);
+      await actual.writeFile(args[0], text.slice(0, Math.ceil(text.length / 2)), "utf8");
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    }
+    return actual.writeFile(...args);
+  }) as typeof actual.writeFile;
   const readFile = ((...args: Parameters<typeof actual.readFile>) => {
     if (renameControl.readRefusals > 0 && String(args[0]).endsWith(".knowledge-bases.json")) {
       renameControl.readRefusals -= 1;
@@ -32,7 +43,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     }
     return actual.readFile(...args);
   }) as typeof actual.readFile;
-  return { ...actual, rename, readFile, default: { ...actual, rename, readFile } };
+  return { ...actual, rename, readFile, writeFile, default: { ...actual, rename, readFile, writeFile } };
 });
 
 vi.mock("../retrieval/engram.js", () => ({
@@ -64,6 +75,7 @@ beforeEach(() => {
   renameControl.impl = null;
   renameControl.calls = 0;
   renameControl.readRefusals = 0;
+  writeControl.cutTempWrites = 0;
   workspacePath = mkdtempSync(join(tmpdir(), "starlingai-kb-integrity-"));
   const realConfig = loaderModule.getConfig();
   vi.spyOn(loaderModule, "getConfig").mockReturnValue({
@@ -175,6 +187,16 @@ describe("knowledge-base registry: writes survive Windows sharing violations", (
     const before = readFileSync(storeFile(), "utf8");
     renameControl.impl = async () => { throw eperm(); };
     await expect(mutateKnowledgeBase("before", (kb) => { kb.name = "After"; })).rejects.toMatchObject({ code: "EPERM" });
+    expect(readFileSync(storeFile(), "utf8")).toBe(before);
+    expect(readdirSync(storeDir()).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("a write cut short (a full disk) throws, leaves the registry as it was, and removes its temp file", async () => {
+    await createOk("Before");
+    const before = readFileSync(storeFile(), "utf8");
+    writeControl.cutTempWrites = 1;
+    await expect(mutateKnowledgeBase("before", (kb) => { kb.name = "After"; })).rejects.toMatchObject({ code: "ENOSPC" });
+    expect(writeControl.cutTempWrites).toBe(0);
     expect(readFileSync(storeFile(), "utf8")).toBe(before);
     expect(readdirSync(storeDir()).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });

@@ -79,6 +79,12 @@ case "$rag" in
     fi
     ;;
 esac
+# A docker-compose.override.yml goes last (as in scripts/compose-files.mjs): Compose reads it on
+# its own only when it is given no -f.
+if [ -f docker-compose.override.yml ]; then
+  compose_files+=(-f docker-compose.override.yml)
+  ok "docker-compose.override.yml found — loaded last, after docker-compose.yml"
+fi
 
 # Host path for sandbox/sub-container bind mounts (mirrors scripts/sai.mjs).
 export SAI_WORKSPACE_MOUNT_SOURCE="$PWD"

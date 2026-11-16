@@ -86,7 +86,7 @@ describe("lab prompt overlay", () => {
   });
 
   it("the lab process never writes the compiled config or the runtime overlay", async () => {
-    // A shard directory, as deployed: only that layout writes a compiled artifact (next to it).
+    // A shard directory: the layout whose compiled file (`sai config build`'s output) sits next to it.
     const root = mkdtempSync(join(tmpdir(), "lab-overlay-shards-"));
     dirs.push(root);
     const configDir = join(root, "starling_config");
@@ -105,10 +105,13 @@ describe("lab prompt overlay", () => {
     expect(() => loader.updateConfig(() => undefined)).toThrow(/does not change/);
     expect(existsSync(join(configDir, "runtime"))).toBe(false);
 
-    // The same load outside the lab process writes it: the check above can fail.
+    // The same save outside the lab process writes the overlay: the check above can fail. No process
+    // writes the compiled file; only `sai config build` does.
     delete process.env["SAI_HARNESS_LAB_PROCESS"];
     const outside = await load();
     outside.loader.loadConfig();
-    expect(existsSync(compiled)).toBe(true);
+    outside.loader.updateConfig(() => undefined);
+    expect(existsSync(join(configDir, "runtime"))).toBe(true);
+    expect(existsSync(compiled)).toBe(false);
   });
 });

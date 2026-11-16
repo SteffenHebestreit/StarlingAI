@@ -24,6 +24,7 @@ import {
   type ScheduledTaskRecord,
 } from "./scheduled-tasks.js";
 import { sameAccountId } from "./accounts.js";
+import { runWithRequestContext } from "./request-context.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("scheduled-task-runner");
@@ -110,6 +111,7 @@ async function queueRun(id: string): Promise<boolean> {
       ...(rec.userId ? { userId: rec.userId } : {}),
       ...(rec.userId && rec.account ? { account: rec.account } : {}),
       ...(rec.userId && !rec.account && rec.principal ? { principal: rec.principal } : {}),
+      ...(rec.userId && rec.requestedByRole ? { requestedByRole: rec.requestedByRole } : {}),
       turnTimeoutMs: turnTimeoutMs(),
       scheduleId: rec.id,
     });
@@ -202,7 +204,10 @@ export function scheduledTaskCronIds(): Set<string> {
 export function addAndActivateScheduledTask(rec: ScheduledTaskRecord): void {
   unregister(rec.id);
   saveScheduledTask(rec);
-  register(rec);
+  // Armed in an empty request context: a timer or cron job keeps the context it was created in for
+  // every run it fires, and the call that made the schedule (schedule_task's) carries its turn, role
+  // included. Whom a run is for is the record's to say.
+  runWithRequestContext({}, () => register(rec));
 }
 
 /** Stop + unpersist a scheduled task. Returns false if there was no such schedule. */

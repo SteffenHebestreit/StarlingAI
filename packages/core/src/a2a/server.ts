@@ -18,7 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
 import { runSubAgentWithStats, type SubAgentRunOptions } from "../agent/sub-agent.js";
-import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, type AuthenticatedUser } from "../gateway/auth.js";
+import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, userHasRole, type AuthenticatedUser } from "../gateway/auth.js";
 import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -158,6 +158,20 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
     switch (rpc.method) {
       case "tasks/send": {
         const params = rpc.params as A2ATasksSendParams;
+        // A task runs an agent with its tools, which is what the operator rank buys on /api (the
+        // mutation gate); a signed-in account below it, such as a viewer, ran any exposed agent here.
+        // Only an account of this deployment (set under multi-user auth) has a role to check: the
+        // shared bearer and an identity provider's peer are machine callers the operator configured,
+        // and pass as before, as does every caller with auth off.
+        if (authResult.user && !userHasRole(authResult.user, "operator")) {
+          logAudit("rbac_denied", {
+            surface: "a2a",
+            method: rpc.method,
+            username: authResult.user.username,
+            role: authResult.user.role,
+          }, { userId: authResult.user.username, severity: "warn" });
+          return respondError(res, id, A2A_ERROR.FORBIDDEN);
+        }
         // Under multi-user auth a sessionId must be a string. The body is parsed JSON, and a
         // non-string one was used as the task's session id as it came and as its string inside the
         // caller's namespace, two different values (found in review, 2026-10-09). With auth off the
@@ -309,11 +323,14 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       // denied user-restricted resources while still reaching shared ones.
       userId: caller === "anonymous" ? undefined : caller,
       ...(runIdentity ? { identity: runIdentity } : {}),
+      // The signed-in account's role, for the run's role-aware tools, as its chat turns have it.
+      ...(user ? { userRole: user.role } : {}),
     };
     // The account on the request context too, which the run's own memory reads and per-user
-    // stores take their account from; with no account there, as before.
+    // stores take their account from, and its role, which the run's delegations inherit; with no
+    // account there, as before.
     const run = user
-      ? await runWithRequestContext({ identity: runIdentity }, () => runSubAgentWithStats(runOptions))
+      ? await runWithRequestContext({ identity: runIdentity, callerRole: user.role }, () => runSubAgentWithStats(runOptions))
       : await runSubAgentWithStats(runOptions);
 
     const finalTask: A2ATask = {
@@ -382,8 +399,8 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
       : { ok: false, caller: "anonymous" };
   }
 
-  // Otherwise, accept a regular gateway JWT — operators get full access; viewer
-  // tokens are accepted (tier policies still apply).
+  // Otherwise, accept a regular gateway JWT. Under multi-user auth tasks/send then needs the
+  // operator rank (handleJsonRpcRequest); tasks/get and the extended card take any account.
   const verified = await verifyToken(token);
   if (verified) {
     // Under multi-user auth a signed token is only as good as the account behind it. Any

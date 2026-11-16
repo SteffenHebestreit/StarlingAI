@@ -284,21 +284,24 @@ describe("posting into the conversation", () => {
 describe("a notification with an owner", () => {
   const owned = { id: "n1", title: "Follow-up: x", message: "m", level: "info" as const, createdAt: "t", owner: { userId: "alice", account: "alice-0123456789abcdef" } };
 
+  const operator = { seesUnowned: true };
+
   it("goes to its owner alone under multi-user auth, without saying whose it is", () => {
     multiUser = true;
-    expect(notificationForCaller(owned, { userId: "alice", account: "alice-0123456789abcdef" })).toEqual({ id: "n1", title: "Follow-up: x", message: "m", level: "info", createdAt: "t" });
-    expect(notificationForCaller(owned, { userId: "bob", account: "bob-0123456789abcdef" })).toBeUndefined();
-    expect(notificationForCaller(owned, undefined)).toBeUndefined();
+    expect(notificationForCaller(owned, { userId: "alice", account: "alice-0123456789abcdef" }, operator)).toEqual({ id: "n1", title: "Follow-up: x", message: "m", level: "info", createdAt: "t" });
+    expect(notificationForCaller(owned, { userId: "bob", account: "bob-0123456789abcdef" }, operator)).toBeUndefined();
+    expect(notificationForCaller(owned, undefined, operator)).toBeUndefined();
   });
 
   it("goes to the one operator when there is nobody else", () => {
-    expect(notificationForCaller(owned, undefined)).not.toHaveProperty("owner");
-    expect(notificationForCaller(owned, undefined)?.id).toBe("n1");
+    expect(notificationForCaller(owned, undefined, operator)).not.toHaveProperty("owner");
+    expect(notificationForCaller(owned, undefined, operator)?.id).toBe("n1");
   });
 
-  it("without an owner goes to everybody, as before", () => {
+  it("without an owner goes to operators and above under multi-user auth", () => {
     multiUser = true;
     const { owner: _owner, ...open } = owned;
-    expect(notificationForCaller(open, { userId: "bob", account: "bob-0123456789abcdef" })).toEqual(open);
+    expect(notificationForCaller(open, { userId: "bob", account: "bob-0123456789abcdef" }, operator)).toEqual(open);
+    expect(notificationForCaller(open, { userId: "bob", account: "bob-0123456789abcdef" }, { seesUnowned: false })).toBeUndefined();
   });
 });

@@ -14,11 +14,13 @@
  * from "./turn-types.js"`) so every external `import { TurnOutput } from
  * ".../runtime.js"` keeps working unchanged.
  */
-import type { SwarmState } from "../tools/registry.js";
+import type { ApprovalCallback, SwarmState } from "../tools/registry.js";
 import type { EffortTier } from "../config/schema.js";
 import type { AgentSession, SessionProgressMessage, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
 import type { UserInputChannel } from "./user-input.js";
+import type { ApprovalPendingListener } from "../approval/routed.js";
+import type { TurnSender } from "../runtime/request-context.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import type { TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { TurnQualityScorecard } from "./turn-scorecard.js";
@@ -62,7 +64,7 @@ export interface RunTurnOptions {
    *  gateway uses it to push its own hard-timeout out by the same amount, so the delegation-wait
    *  exclusion (orchestration.excludeDelegationWaitFromTurnBudget) holds at BOTH timeout layers. */
   onDelegationWaitMs?: (ms: number) => void;
-  approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  approvalCallback?: ApprovalCallback;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
   /** Steering token of a turn the gateway armed before calling runTurn (turn-steering.ts), so
@@ -75,6 +77,13 @@ export interface RunTurnOptions {
   /** The chat a structured user-input request from this turn reaches (agent/user-input-broker.ts).
    *  Unset: a nested turn inherits its caller's; a top-level one has nobody to ask. */
   userInput?: UserInputChannel;
+  /** Told when a tool call of this turn, or of a run it starts, waits for someone else's approval
+   *  (ToolContext.onApprovalPending). Unset: a nested turn inherits its caller's. */
+  onApprovalPending?: ApprovalPendingListener;
+  /** The signed-in person who sent this turn's message, read when asked (RequestContext.sender):
+   *  who asked for a tool call, and the role they hold now. Unset: a nested turn inherits its
+   *  caller's; a turn no person sent has none. */
+  sender?: () => TurnSender;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
   /** The agent the user directed this turn to (`--agent NAME`; allowedAgents narrows to it too). The
@@ -82,7 +91,8 @@ export interface RunTurnOptions {
   directiveAgent?: string;
   /** Tool names that must pause for human approval this turn (enforced unconditionally) */
   humanInLoopSteps?: string[];
-  /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
+  /** Auto-approve this turn's tool calls (`--auto`), except a humanInLoopSteps step: that one still
+   *  goes to approvalCallback, and without one it is refused. */
   autoApprove?: boolean;
   /** The turn runs with nobody watching (`--auto`): the forced first call of
    *  orchestration.autonomousModeAntiRefusal, ask_user answering itself, routing's `autonomous`
@@ -102,6 +112,11 @@ export interface RunTurnOptions {
    *  without agent and skill discovery, and while some of them have not run, a delegation that
    *  returned keeps the turn going instead of ending it. Internal. */
   _workflowStepPipeline?: string[];
+  /** The message is the task text of a queued scene or job step, run by the scene worker
+   *  (agent/scene-worker.ts) on a session it opened: the input guardrail flags prompt injection in
+   *  it but does not block it (prepareInputGuardrails). Without it, a turn on such a session (a
+   *  client's chat into it) is screened like any message. Internal. */
+  _trustedWorkflowInput?: boolean;
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */

@@ -21,7 +21,8 @@
   // "gateway" is implied by turn/http steps, "mail" by mail steps. Choices: gateway, model, embeddings,
   // web-search, browser, sandbox, engram, image, mail, e2e-site, computer-desktop, laya, speech.
   requires: ["model", "e2e-site", "mail"],
-  // Who the turns run as: "eval" (operator, the default) or "eval-viewer" (viewer). Created by `pnpm e2e:setup`.
+  // Who the turns run as: "eval" (operator, the default) or "eval-peer" (a second operator). Created by
+  // `pnpm e2e:setup`, with "eval-viewer" (viewer), which may only read: the gateway runs no turn for it.
   identity: "eval",
   // Ceiling for one whole attempt, default 15 minutes. A turn still running at the deadline is cancelled.
   timeoutMs: 900000,
@@ -40,7 +41,7 @@
       // dashboard (`--auto` approves every tool call of the turn; the harness answers no prompts).
       message: "Wie viele Mitarbeiter hat die Nordlicht Werkzeuge GmbH laut http://www.nordlicht-werkzeuge.test/? Die Notiz im Anhang ist nur Kontext.",
       // agent: "researcher",   // forces `--agent researcher`; omit to let the swarm route
-      // as: "eval-viewer",     // runs this turn as another identity, in that identity's own session
+      // as: "eval-peer",       // runs this turn as another identity, in that identity's own session
       // Effort tier for this message: low | medium | high | max.
       effort: "medium",
       // Files under eval/e2e/fixtures/, uploaded into the session and attached like the web client does.

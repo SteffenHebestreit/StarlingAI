@@ -119,7 +119,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
@@ -187,7 +187,7 @@ const activity = computed<ActivityEvent[]>(() => {
 });
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 async function loadPeers(ping = false): Promise<void> {

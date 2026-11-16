@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const streamMock = vi.hoisted(() => vi.fn());
 const completeMock = vi.hoisted(() => vi.fn(async () => ({
@@ -86,6 +86,8 @@ const fixtures = JSON.parse(
   readFileSync(new URL("./fixtures/runtime-delegation-loop.json", import.meta.url), "utf8"),
 ) as DelegationLoopFixtures;
 const tempConfigDirs: string[] = [];
+// Each test's own workspace: a turn reads the workspace's memory, skills, flow memory and files.
+let workspacePath = "";
 
 async function loadFreshRuntimeForToolMode(
   toolMode: "hybrid" | "orchestration_only",
@@ -95,6 +97,7 @@ async function loadFreshRuntimeForToolMode(
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath,
     agents: {
       mainAssistant: {
         toolMode,
@@ -199,6 +202,11 @@ function createLengthLimitedTextStream(text: string) {
   })();
 }
 
+beforeEach(() => {
+  workspacePath = mkdtempSync(join(tmpdir(), "starlingai-runtime-loop-"));
+  tempConfigDirs.push(workspacePath);
+});
+
 afterEach(() => {
   for (const dir of tempConfigDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -265,7 +273,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -308,7 +316,7 @@ describe("runtime delegated-loop regressions", () => {
         }
         return createThrowingStream("Connection error.");
       });
-      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
       registerTool({
         name: "delegate_to_agent",
         description: "Delegate to a specialist.",
@@ -385,7 +393,7 @@ describe("runtime delegated-loop regressions", () => {
         metadata: { agentName: "mission_coordinator", delegationSucceeded: true, delegationOutcome: "partial", terminalState: "timeout" },
       })),
     });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     const result = await runTurn({ session, userMessage: "Draft the portable ESP32 recorder deliverable.", signal: stop.signal });
 
@@ -436,7 +444,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -494,7 +502,7 @@ describe("runtime delegated-loop regressions", () => {
           metadata: { agentName: "code_analyst", delegationSucceeded: true, delegationOutcome: "partial", terminalState: "completed" },
         })),
       });
-      const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      const session = new freshRuntime.AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
       const result = await freshRuntime.runTurn({ session, userMessage });
       freshRuntime.unregisterTool("delegate_to_agent");
       return result;
@@ -523,7 +531,7 @@ describe("runtime delegated-loop regressions", () => {
     streamMock.mockImplementation(() => createTextStream("A brief note that references https://example.com/x."));
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     const result = await freshRuntime.runTurn({
@@ -583,7 +591,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -647,7 +655,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -680,7 +688,7 @@ describe("runtime delegated-loop regressions", () => {
     ));
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     const result = await freshRuntime.runTurn({
@@ -735,7 +743,7 @@ describe("runtime delegated-loop regressions", () => {
       execute: delegateExecuteMock,
     });
 
-    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const result = await freshRuntime.runTurn({ session, userMessage: "Fasse den Werdegang aus meinem Lebenslauf zusammen." });
 
     expect(result.blocked).toBe(false);
@@ -788,7 +796,7 @@ describe("runtime delegated-loop regressions", () => {
       execute: delegateExecuteMock,
     });
 
-    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const result = await freshRuntime.runTurn({ session, userMessage: "Was weißt du über meinen beruflichen Hintergrund?" });
 
     expect(result.blocked).toBe(false);
@@ -833,7 +841,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     const observedToolResults: string[] = [];
@@ -899,7 +907,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -969,7 +977,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1004,7 +1012,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new fresh.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1061,7 +1069,7 @@ describe("runtime delegated-loop regressions", () => {
     });
     const session = new fresh.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1110,7 +1118,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1191,7 +1199,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1265,7 +1273,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1320,7 +1328,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1380,7 +1388,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1430,7 +1438,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1472,7 +1480,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1536,7 +1544,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1588,7 +1596,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1667,7 +1675,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1770,7 +1778,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1812,7 +1820,7 @@ describe("runtime delegated-loop regressions", () => {
     const session = new FreshAgentSession({
       sessionId,
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -1957,7 +1965,7 @@ describe("runtime delegated-loop regressions", () => {
     const session = new FreshAgentSession({
       sessionId,
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2025,7 +2033,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2097,7 +2105,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2160,7 +2168,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2237,7 +2245,7 @@ describe("runtime delegated-loop regressions", () => {
     const session = new FreshAgentSession({
       sessionId,
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2319,7 +2327,7 @@ describe("runtime delegated-loop regressions", () => {
     const session = new FreshAgentSession({
       sessionId,
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2401,7 +2409,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2466,7 +2474,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2568,7 +2576,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2588,7 +2596,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2668,7 +2676,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2710,7 +2718,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2757,7 +2765,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2809,7 +2817,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2886,7 +2894,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2940,7 +2948,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -2994,7 +3002,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3067,7 +3075,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3140,7 +3148,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3213,7 +3221,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3266,7 +3274,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3341,7 +3349,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3432,7 +3440,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3458,7 +3466,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3485,7 +3493,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3498,7 +3506,7 @@ describe("runtime delegated-loop regressions", () => {
   });
 
   it("task-conditional prompt is off by default (intent-routing rules present in the base prompt)", async () => {
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace" });
+    const session = new AgentSession({ channel: "test", workspacePath });
     expect(session.getSystemPrompt()).toContain("are computer-use tasks, not pentest tasks");
   });
 
@@ -3507,7 +3515,7 @@ describe("runtime delegated-loop regressions", () => {
       agents: { mainAssistant: { toolMode: "orchestration_only" }, performance: { taskConditionalPrompt: true } },
     });
 
-    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace" });
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath });
     const prompt = session.getSystemPrompt();
 
     // Opt-in lean mode: the redundant always-on intent rules are dropped...
@@ -3584,7 +3592,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3657,7 +3665,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3744,7 +3752,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3840,7 +3848,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -3901,7 +3909,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     const observedToolResults: string[] = [];
@@ -4001,7 +4009,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4158,7 +4166,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4223,7 +4231,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4300,7 +4308,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4423,7 +4431,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4551,7 +4559,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4700,7 +4708,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4800,7 +4808,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "workflow",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4860,7 +4868,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4932,7 +4940,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -4991,7 +4999,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new freshRuntime.AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -5027,7 +5035,7 @@ describe("runtime delegated-loop regressions", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -5056,7 +5064,7 @@ describe("the user's own words on the turn's tool context", () => {
     const steering = "nimm das qwen model";
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
 
@@ -5104,7 +5112,7 @@ describe("the user's own words on the turn's tool context", () => {
 });
 
 describe("mid-turn steering the loop takes, and steering it never reaches", () => {
-  const makeSession = () => new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+  const makeSession = () => new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
   it("names the messages it folds in, with the history message's time, before the steering status", async () => {
     // The client splits the running answer where the message was taken. It can only do that if it
@@ -5283,7 +5291,7 @@ describe("mid-turn steering the loop takes, and steering it never reaches", () =
     const freshRuntime = await loadFreshRuntimeForToolMode("hybrid");
     // The fresh module graph has its own steering manager; the runtime under test uses that one.
     const { turnSteeringManager: freshSteering } = await import("../agent/turn-steering.js");
-    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new freshRuntime.AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     let llmCallCount = 0;
     streamMock.mockImplementation(() => {

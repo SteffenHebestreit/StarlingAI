@@ -8,13 +8,29 @@
  * and are lifted alongside the routes (kept inside the registrar).
  */
 import type { Hono } from "hono";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
 import { channelSecretDestinations, refuseMovedSecrets } from "./config-secrets.js";
 import { getConfig } from "../config/loader.js";
 import { getChannelStatuses } from "../channels/registry.js";
 import { CHANNEL_TYPES, getStoredChannelConfig, saveChannelConfig, deleteChannelConfig, getEffectiveChannelConfig, getChannelConfigSource, redactChannelSecrets, type StoredChannelConfig } from "../credentials/channels.js";
 import { getChannelRuntimeSupport, reloadChannel } from "../channels/runtime.js";
 import { readDeadLetters, type DeadLetterEntry } from "../channels/dead-letter.js";
+
+/**
+ * How much of the dead-letter queue a caller may read. An entry is an undelivered message: its
+ * channel, a preview of its text and the error. Under multi-user auth the count is for operators
+ * and above and the entries for admins, who run the channels; with auth off, both, as before.
+ *
+ * One rule for both routes that serve entries, GET /api/channels/dead-letters (gateway/index.ts)
+ * and the channel details below: any caller that signed in read them, and once the first route
+ * was closed the second still handed a viewer the five most recent of every channel.
+ */
+export async function deadLetterAccess(authHeader: string | undefined): Promise<"entries" | "count" | "none"> {
+  if (getConfig().auth?.enabled !== true) return "entries";
+  const caller = await authenticatedUser(authHeader);
+  if (userHasRole(caller, "admin")) return "entries";
+  return userHasRole(caller, "operator") ? "count" : "none";
+}
 
 export function registerChannelRoutes(app: Hono): void {
   function buildChannelOperatorState(
@@ -150,6 +166,9 @@ export function registerChannelRoutes(app: Hono): void {
     };
     const runtimeSupport = getChannelRuntimeSupport(type);
     const recentDeadLetters = readDeadLetters({ channel: type, limit: 5 });
+    // The entries go to a caller who may read them (deadLetterAccess). The health summary is worked
+    // out from all of them and names none, so it reads the same for every caller.
+    const shownDeadLetters = await deadLetterAccess(c.req.header("Authorization")) === "entries" ? recentDeadLetters : [];
     return c.json({
       type,
       source: getChannelConfigSource(type),
@@ -160,7 +179,7 @@ export function registerChannelRoutes(app: Hono): void {
         operatorState: buildChannelOperatorState({ ...status, ...runtimeSupport }, recentDeadLetters),
       },
       operator: {
-        recentDeadLetters,
+        recentDeadLetters: shownDeadLetters,
         recoveryProcedures: getChannelRecoveryProcedures(type),
       },
     });

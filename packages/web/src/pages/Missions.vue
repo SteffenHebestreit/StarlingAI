@@ -138,7 +138,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { writeClipboard } from "@/composables/clipboard";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
@@ -239,7 +239,7 @@ async function loadMoreFromGateway(): Promise<void> {
 }
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 async function refresh(): Promise<void> {

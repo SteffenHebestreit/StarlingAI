@@ -32,7 +32,7 @@ describe("wave B/C wiring is in place", () => {
     const rpc = read("gateway/rpc.ts");
     expect(count(rpc, "subAgentHeartbeat(event)")).toBe(1);
     expect(count(rpc, 'type: "agent.heartbeat"')).toBe(1);
-    expect(count(rpc, 'type: "agent.approval_resolved"')).toBe(2);   // answered, timed out
+    expect(count(rpc, 'type: "agent.approval_resolved"')).toBe(3);   // answered, timed out, decided by an approver
   });
 
   it("runtime: delegations the runtime makes itself are announced as steps", () => {

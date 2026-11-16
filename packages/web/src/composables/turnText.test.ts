@@ -87,6 +87,11 @@ describe("the live line", () => {
     expect(turnText.plan("en", { running: 0, pending: 0, done: 0, partial: 0, failed: 0 })).toBeNull();
   });
 
+  it("says whose approval a call waits for, when it is someone else's", () => {
+    expect(turnText.waitingForApprover("en", "record_export", ["reviewer"])).toBe("Record export: waiting for approval by reviewer…");
+    expect(turnText.waitingForApprover("de", "record_export", ["reviewer", "admin"])).toBe("Record export: wartet auf die Freigabe durch reviewer oder admin …");
+  });
+
   it("says what a silent specialist is doing", () => {
     expect(turnText.heartbeat("de", "composing", 4000)).toBe("schreibt … (4.000 Zeichen)");
     expect(turnText.heartbeat("en", "composing", 4000)).toBe("writing… (4,000 chars)");

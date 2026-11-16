@@ -53,7 +53,7 @@ describe("the user's own words reach every delegated specialist", () => {
   let words: TurnUserWords;
   const ctx = (sessionId: string): ToolContext => ({
     sessionId,
-    workspacePath: "/workspace",
+    workspacePath: tempDir,
     swarmState: freshSwarmState(),
     turnUserWords: words,
   });
@@ -63,6 +63,7 @@ describe("the user's own words reach every delegated specialist", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-user-words-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       // The catalog architect below designs the ephemeral agents, in place of the built-in one.
       agents: { ephemeralGeneration: { architectAgentName: "agent_architect" } },
       subAgents: {

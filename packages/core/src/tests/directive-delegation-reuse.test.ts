@@ -60,6 +60,7 @@ describe("signature reuse on a turn directed to an agent", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-directive-reuse-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         researcher: { description: "Finds sources on the web.", systemPrompt: "Research.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
         code_analyst: { description: "Analyzes source code and finds bugs.", systemPrompt: "Analyze.", tools: ["read_file"], maxIterations: 4 },
@@ -86,7 +87,7 @@ describe("signature reuse on a turn directed to an agent", () => {
 
   it("runs the directed agent although another agent's result for the same task is at hand", async () => {
     const run = await delegate();
-    const ctx: ToolContext = { sessionId: "s-directed", workspacePath: "/workspace", swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
+    const ctx: ToolContext = { sessionId: "s-directed", workspacePath: tempDir, swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
 
     await run({ agentName: "researcher", task: TASK }, ctx);
     const earlier = Object.values(ctx.swarmState!.tasks)[0]!;
@@ -106,7 +107,7 @@ describe("signature reuse on a turn directed to an agent", () => {
     // delegation to the agent would miss the agent's own run behind it and start it again, and the
     // reuse limit would never be reached.
     const run = await delegate();
-    const ctx: ToolContext = { sessionId: "s-directed-again", workspacePath: "/workspace", swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
+    const ctx: ToolContext = { sessionId: "s-directed-again", workspacePath: tempDir, swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
 
     await run({ agentName: "researcher", task: TASK }, ctx);
     await run({ agentName: "code_analyst", task: TASK }, ctx);
@@ -123,11 +124,11 @@ describe("signature reuse on a turn directed to an agent", () => {
     // The controls: a caller that names nobody takes whatever ran the task, and one that names the
     // agent that ran it gets that run back — so a loop on one agent stays capped.
     const run = await delegate();
-    const directed: ToolContext = { sessionId: "s-undirected-call", workspacePath: "/workspace", swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
+    const directed: ToolContext = { sessionId: "s-undirected-call", workspacePath: tempDir, swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
     await run({ agentName: "researcher", task: TASK }, directed);
     const undirectedCall = await run({ task: TASK }, directed);
 
-    const plain: ToolContext = { sessionId: "s-plain-turn", workspacePath: "/workspace", swarmState: freshSwarmState() };
+    const plain: ToolContext = { sessionId: "s-plain-turn", workspacePath: tempDir, swarmState: freshSwarmState() };
     await run({ agentName: "researcher", task: TASK }, plain);
     const sameAgentAgain = await run({ agentName: "researcher", task: TASK }, plain);
     const andAgain = await run({ agentName: "researcher", task: TASK }, plain);
@@ -142,7 +143,7 @@ describe("signature reuse on a turn directed to an agent", () => {
     // Session 5b77edf9: nobody directed the turn. The first run answered the task from the wrong
     // agent; the caller then named the right one, with the same words.
     const run = await delegate();
-    const plain: ToolContext = { sessionId: "s-plain-named", workspacePath: "/workspace", swarmState: freshSwarmState() };
+    const plain: ToolContext = { sessionId: "s-plain-named", workspacePath: tempDir, swarmState: freshSwarmState() };
 
     await run({ agentName: "researcher", task: TASK }, plain);
     const named = await run({ agentName: "code_analyst", task: TASK }, plain);

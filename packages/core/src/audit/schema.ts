@@ -24,6 +24,8 @@ export type CoreAuditEventType =
   | "tool_call_requested"
   | "tool_call_approved"
   | "tool_call_blocked"
+  /** An extension's authorizeToolCall refused a call, before any approval prompt (tools/registry.ts). */
+  | "tool_call_refused"
   | "tool_call_completed"
   | "tool_call_failed"
   | "tool_call_recovered"
@@ -38,6 +40,9 @@ export type CoreAuditEventType =
   | "tool_output_framing_neutralized"
   | "guardrail_blocked"
   | "guardrail_flagged"
+  /** A caller-supplied scene/job parameter refused by the input scanner before the run was queued
+   *  (guardrails/workflow-params.ts). Carries the parameter's name and patterns, never its value. */
+  | "workflow_param_blocked"
   /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
   | "decision_point"
   /** A decision point's incumbent read by its logits, beside or instead of its parsed call (decisions/incumbent-readout.ts). */
@@ -65,6 +70,9 @@ export type CoreAuditEventType =
   | "credential_fill"
   | "session_reset"
   | "session_rewound"
+  /** A sub-agent run refused before it started: the role floor for full-scope agents or an
+   *  extension's authorizeAgentRun hook (agent/full-scope-agent-floor.ts). */
+  | "agent_run_refused"
   | "sub_agent_started"
   | "sub_agent_completed"
   | "sub_agent_soft_deadline"
@@ -99,6 +107,8 @@ export type CoreAuditEventType =
   | "ephemeral_model_override_rejected"
   | "approval_requested"
   | "approval_resolved"
+  | "approval_routed_requested"
+  | "approval_routed_resolved"
   | "warden_alert"
   | "architect_fallback_started"
   | "architect_fallback_completed"
@@ -392,6 +402,8 @@ export type CoreAuditEventType =
   /** The public A2A agent card published the whole sub-agent roster (exposeAgents empty). */
   | "a2a_full_roster_exposed"
   | "a2a_task_completed"
+  /** The legacy A2A route ignored an `autoApprove` from a role below gateway.overrides.autoApproveMinRole. */
+  | "a2a_auto_approve_refused"
   | "a2a_peer_added"
   | "a2a_peer_removed"
   | "a2a_peer_unreachable";

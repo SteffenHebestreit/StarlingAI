@@ -233,7 +233,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
 import { writeClipboard } from "@/composables/clipboard";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
@@ -277,7 +277,7 @@ const cronTriggersLoading = ref(false);
 let cronTriggersTimer: ReturnType<typeof setInterval> | null = null;
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 async function loadCronTriggers(): Promise<void> {

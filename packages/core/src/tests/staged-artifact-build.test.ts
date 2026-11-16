@@ -522,6 +522,7 @@ describe("staged artifact build — directive injection", () => {
     const tempDir = workspaceDir ?? mkdtempSync(join(tmpdir(), "sai-staged-build-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       ...(orchestration ? { orchestration } : {}),
       subAgents: {
         staged_builder: {

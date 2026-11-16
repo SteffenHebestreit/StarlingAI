@@ -9,7 +9,7 @@ The StarlingAI gateway exposes four externally useful surfaces for interacting w
 - REST endpoints under `/api/*`
 - WebSocket RPC at `/ws`
 - AG-UI token streaming at `/api/chat/stream`
-- A2A JSON-RPC at `/a2a/agents/:name`
+- A2A JSON-RPC at `/a2a/v1` (and the deprecated legacy route `/a2a/agents/:name`)
 
 See also: [Security Model](security.md) · [Architecture & Design](architecture.md)
 
@@ -36,7 +36,9 @@ pnpm token
 pnpm sai token
 ```
 
-Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`.
+Under multi-user auth (`auth.enabled`) a signed token counts only while its account still signs in. A token of a deleted account is refused, and so is one whose role, read from the account's record or from the token, neither core nor a loaded extension declares: `401` on HTTP, close code 4401 on the WebSocket. Such an account cannot sign in either: `POST /api/auth/login` answers `401` after the password check. See [Security Model](security.md#roles-nobody-declares).
+
+Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`. `POST /api/jobs/:name/run` takes a job's `api` trigger `webhookKey` the same way, via `?key=` or `X-Job-Key`. A caller with neither a valid token nor a valid key gets `401` whether or not the scene or job exists, and the gateway decides that before it looks the name up, so the time of the answer does not depend on the name either. Only an authenticated caller is told that a name is unknown (`404`).
 
 ## Health And Status
 
@@ -44,7 +46,7 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | --- | --- | --- |
 | `GET` | `/healthz` | returns `{ "status": "ok" }` |
 | `GET` | `/readyz` | returns readiness, active-session count, deployment-mode dependencies, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled); clustered modes return `503` when Redis or PostgreSQL is unavailable |
-| `GET` | `/api/status` | authenticated summary of uptime and active sessions |
+| `GET` | `/api/status` | authenticated summary of uptime and active sessions; under multi-user auth only the sessions the caller may see (its own and unowned ones, every one for an admin), as the socket's session list |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
 | `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity, and a sandbox canary: a `docker run` through shell_exec must hand back what it printed on stdout and on stderr, else `degraded`, never 503; a verdict serves 5 minutes, carries `checkedAt` and `ageMs` (its age on the gateway's clock), and is not re-measured while a turn is running); 503 if any subsystem is unavailable |
 | `GET` | `/api/observability/recovery-nets` | authenticated firing counts per orchestration recovery net (which autopilots actually fire) |
@@ -177,6 +179,8 @@ Example response shape:
 | `GET` | `/api/scenes/jobs/:jobId` | poll a scene job |
 | `POST` | `/api/scenes/jobs/:jobId/cancel` | cancel a queued or running scene job |
 
+`POST /api/scenes/:name/run` (and `POST /api/jobs/:name/run`) take optional `{ "params": { "key": "value" } }`. Each value a scene's task reads (for a job, through a step's `params`) is screened as untrusted input before it is templated in: prompt-injection patterns, and at most `guardrails.maxInputLength` characters (32000 by default). A refused value answers `400` with `{ error, param }` and queues nothing. A key no task reads is not screened. The same screen runs on `/run` and `/job` in `chat.send`, where a refused parameter answers `accepted: false` with a `blocked` status that names it, and on an MCP `scene__<name>` call, where it covers the `context` as well and a refusal answers `isError` (see [security.md](security.md#layer-1--input-scanner)).
+
 `POST /api/scenes/:name/run` returns immediately:
 
 ```json
@@ -272,16 +276,33 @@ What the assistant was asked to run later, to repeat or to watch: a schedule mad
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/approval/:approvalId` | one-click approve or deny HTML response |
-| `POST` | `/api/approval/:approvalId` | programmatic approval callback |
+| `GET` | `/api/approvals/pending` | the pending approvals the caller may decide (the dashboard's Operator requests) |
+| `GET` | `/api/approval/:approvalId` | the approval link: an HTML page with Approve and Deny buttons; the GET changes nothing |
+| `POST` | `/api/approval/:approvalId` | resolves the request: the page's buttons, and programmatic callbacks |
 
-Accepted POST forms:
+The `approveUrl` / `denyUrl` links a channel sends (`?approved=true|false&secret=...`) open the confirmation page and do not resolve the request on their own, because link previewers, mail scanners and chat unfurlers fetch links with nobody behind them. The page's buttons post `approved=true|false&secret=...` as `application/x-www-form-urlencoded` to the same path and get an HTML answer. A form post without exactly one `approved` of `true` or `false` decides nothing: it gets `400`, and the request stays pending.
+
+Accepted JSON POST forms (programmatic receivers, which should POST to `callbackUrl` rather than fetch the links):
 
 ```json
 { "approved": true, "secret": "..." }
 ```
 
-or `Authorization: Bearer <secret>` with `{ "approved": true }`.
+or `Authorization: Bearer <secret>` with `{ "approved": true }`, or a gateway token (the dashboard) with `{ "approved": true }`. A body that is JSON is read as JSON whatever its `Content-Type` says, so `curl -d '{...}'`, which sends `application/x-www-form-urlencoded`, works. A JSON body that is not an object gets `400` (`Invalid JSON body`).
+
+A run that stops while it waits (Stop, a superseding message, the turn watchdog, a cancelled job) withdraws its channel request: the link and this callback then answer as for a request already resolved.
+
+A wrong or missing secret gets the answer an unknown or already resolved approval id gets: `404` with `Approval request not found or already resolved` (an HTML page on `GET` and on a form post). The id alone does not tell whether a request is pending; the gateway log records a secret that did not match a pending request.
+
+A pending approval has a `kind`:
+
+- **`channel`**: a scene or job run's approval, sent to its approval channel. It is decided with the channel's secret or by an operator's session. `GET /api/approvals/pending` lists it at operator rank.
+- **`routed`**: a call of a tool whose approval policy names who may grant it (see [Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It has no secret.
+  - It is listed only to callers whose role the policy admits, and with `distinctApprover` not to the requester. Its entry carries `requester`, `requesterRole`, `approverRoles`, `distinctApprover`, `expiresAt` and the call's `args`. `requester` is the person who sent the message, with the role they held then. That is not the chat's owner when an admin drives another account's chat.
+  - `POST` decides it only with such a caller's session and records who decided. Any other signed-in caller gets `403`, and the requester under `distinctApprover` gets `403 A second person must approve this request`.
+  - A secret, the one-click link and a request without a session get the answer an unknown id gets (`404`).
+
+A viewer's pending list is empty.
 
 ### Sessions And Exports
 
@@ -299,13 +320,37 @@ The debug Markdown export is intended for operator review, incident handling, an
 
 The audit-only Markdown export is the lighter-weight companion. It keeps the session metadata and matching audit events for the session plus related sub-agent and workflow sessions, but omits the transcript and raw-history sections.
 
+### Computer-Use And Browser Sessions
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/computer-sessions` | computer-use sessions, scoped to the caller (see below) |
+| `GET` | `/api/computer-sessions/active` | the same, only sessions that are initializing, active or paused |
+| `GET` | `/api/computer-sessions/config` | `{ enabled }`; an admin gets the whole `computerUse` config block (node hosts, the remote-access URL, credential variable names) |
+| `GET` | `/api/computer-sessions/:id` | one session; `404` when not accessible |
+| `POST` | `/api/computer-sessions/:id/heartbeat` | keeps a session alive and resumes a paused one; `404` when not accessible (`403` for a viewer, as for every REST `POST`) |
+| `POST` | `/api/computer-sessions/:id/emergency-stop` | `{ reason? }`; any operator, any session (`403` for a viewer, as for every REST `POST`) |
+| `GET` | `/api/browser-sessions/config` | `{ enabled, reachable }` |
+| `GET` | `/api/browser-sessions` | browser runs the caller may see (see below) |
+| `GET` | `/api/browser-sessions/active` | the same, without stopped runs |
+| `GET` | `/api/browser-sessions/:id` | one run; `404` when not accessible |
+| `POST` | `/api/browser-sessions/:id/resolve-assist` | "I solved it, continue" for a run waiting on a person; operator rank (`403` for a viewer), `404` when not accessible |
+
+Under multi-user auth a computer-use session belongs to the chat whose run holds its lease (`leaseOwner`, often a `sub:` run of that chat), and a browser run to the chat that delegated it (`parentSessionId`). The owner of that chat sees the session whole and drives it (a heartbeat, a fresh frame), and so does an admin, by the rule of `/api/sessions/:sessionId`; driving it also takes operator rank, as every call that changes something does, so a viewer only watches its own. An emergency stop revokes the lease and keeps the last frame, so a stopped session stays with the chat that held it (`revokedLeaseOwner`). A session no run holds (detached) and a browser run with no parent are an admin's alone. A session the caller may not use answers `404` as a missing one does.
+
+The computer-session listings show the caller's own sessions whole. An operator also sees everyone else's, as `{ id, adapter, nodeId?, state, createdAt, emergencyStopAt?, restricted: true }`: enough to stop a runaway session, without its last frame (`lastSnapshot`: screenshot, accessibility text, active window) or lease owner. A viewer sees only its own. The browser-session listings show only the runs the caller may use.
+
+Any operator may emergency-stop any computer session, over REST or the socket; it is a safety control. A viewer stops none, its own included: REST refuses its `POST`s, and over the socket `computer.emergency_stop` and `computer.heartbeat` need operator rank (see [WebSocket RPC](#websocket-rpc)). The audit event `computer_session_emergency_stop` records `{ sessionId, actor, role, via, reason }`: `actor` is the identity the token or socket resolved to (its `userId`, with `account` or `principal`), `via` is `rest`, `rpc` or `system` (the warden, a failed adapter start; these carry no actor), and `reason` is the client's free text, cut to 200 characters. Before, the event was `{ sessionId, operator }` with the client's reason as `operator`.
+
+With auth off, the single operator sees and drives every session, as before.
+
 ### Channels
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/channels` | runtime status array for known channel types |
-| `GET` | `/api/channels/dead-letters` | `{ count, entries }` |
-| `GET` | `/api/channels/:type` | redacted effective config plus runtime status |
+| `GET` | `/api/channels/dead-letters` | `{ count, entries }`; under multi-user auth operator rank (`403` below it), and `entries` is empty unless the caller is an admin |
+| `GET` | `/api/channels/:type` | redacted effective config plus runtime status; under multi-user auth `operator.recentDeadLetters` is empty unless the caller is an admin |
 | `PUT` | `/api/channels/:type` | store override and reload runtime |
 | `DELETE` | `/api/channels/:type` | remove store override and reload |
 
@@ -492,7 +537,7 @@ These authenticated routes provide the backend bridge for the multimodal stack u
 
 `POST /api/multimodal/analyze-image` (multipart `file`, optional `prompt`) sends the picture to the vision model and returns `{ analysis, model, filename }`. It waits `multimodal.files.visionTimeoutMs` (120 s by default) for the model, the same as the `analyze_image` tool; `multimodal.files.timeoutMs` is the file converter's.
 
-**Upload size.** The gateway accepts up to `multimodal.maxUploadBytes` (20 MB by default) on `/api/multimodal/*`, `/api/documents` and `/api/workspace/upload`, and `gateway.maxBodyBytes` (1 MB by default) everywhere else; a larger body gets `413` with `{ "error": "Request body too large" }`. The dashboard container's proxy (`docker/web/nginx.conf`) passes bodies of up to 64 MB on `/api/` and waits 300 s for an answer, so the gateway's limits are the ones that apply; raise `client_max_body_size` there together with `multimodal.maxUploadBytes` if that goes beyond 64 MB. The dashboard shows either refusal as "too large to upload".
+**Upload size.** The gateway accepts up to `multimodal.maxUploadBytes` (20 MB by default) on `/api/multimodal/*`, `/api/documents` and `/api/workspace/upload`, and `gateway.maxBodyBytes` (1 MB by default) everywhere else; a larger body gets `413` with `{ "error": "Request body too large" }`. The dashboard container's proxy (`docker/web/nginx.conf`) passes bodies of up to 64 MB on `/api/` and waits 300 s for an answer, so the gateway's limits are the ones that apply; raise `client_max_body_size` there together with `multimodal.maxUploadBytes` if that goes beyond 64 MB. The proxy receives a whole body before it passes it on; one over 8 KB waits in a tmpfs (memory, never the container's disk) of `SAI_WEB_TMPFS_SIZE` (128 MB by default) that counts toward `SAI_WEB_MEM_LIMIT` (256 MB), so raise both with `client_max_body_size`. That tmpfs is shared by all requests, and while it is full every body over 8 KB gets a `500`: size it for the uploads expected at once ([security.md](security.md#dashboard-proxy-no-request-data-on-disk)). The dashboard shows either refusal as "too large to upload". A refusal sent before the body was read (this `413`, or a `401`) leaves a keep-alive connection usable for the next request: the gateway reads and drops the rest of the body, up to 64 MB and for at most 500 ms. When that is not enough, for example for a larger body, the client still gets the reply and the gateway then closes the connection.
 
 `GET /api/multimodal/config` returns the fully resolved `multimodal` section from the active runtime config.
 
@@ -555,7 +600,7 @@ Connect to:
 ws://localhost:8765/ws?token=<jwt>
 ```
 
-After auth, the server sends `hello-ok`.
+After auth, the server sends `hello-ok` with `{ connId, version, sessions, methods }`: `sessions` lists the sessions the connection may see, and `methods` the RPC methods it may call, as its role stands at the handshake (see the Role column below). A client offers only those controls; the gateway still checks every call when it arrives, so a role changed later shows in the answers. A refused socket is closed with a code instead: 4401 (no valid token, or one whose account does not sign in, such as an account whose role neither core nor a loaded extension declares), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in (deleted, or its role changed to one nobody declares), and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
 
 Request shape:
 
@@ -569,33 +614,49 @@ Response shape:
 { "type": "rpc.response", "id": "req-1", "ok": true, "payload": { "sessionId": "..." } }
 ```
 
-Supported RPC methods:
+Supported RPC methods, with the lowest role that may call each under multi-user auth (`auth.enabled`):
 
-| Method | Params |
-| --- | --- |
-| `gateway.status` | `{ requestId? }` |
-| `session.create` | `{ channel, userId?, workspacePath? }` |
-| `session.end` | `{ sessionId? }` |
-| `session.get` | `{ sessionId?, limit?, beforeMessageId? }` |
-| `session.list` | none |
-| `session.archive` | `{ sessionId? }` |
-| `session.delete` | `{ sessionId? }` |
-| `session.reset` | `{ sessionId? }` |
-| `session.rewind` | `{ sessionId?, historyIndex }` |
-| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` |
-| `scenes.list` | none |
-| `approval.respond` | `{ approvalId, approved }` |
-| `input.respond` | `{ inputId, answer }` |
-| `userInput.respond` | `{ inputId, answer }` |
-| `userInput.hold` | `{ inputId }` |
-| `userInput.preview` | `{ inputId, candidateId }` |
-| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort?, timeZone? }` |
-| `chat.cancel` | `{ requestId }` |
-| `audit.subscribe` | none |
+| Method | Params | Role |
+| --- | --- | --- |
+| `gateway.status` | `{ requestId? }` | viewer |
+| `session.create` | `{ channel?, userId?, workspacePath? }` | operator |
+| `session.end` | `{ sessionId? }` | operator |
+| `session.get` | `{ sessionId?, limit?, beforeMessageId? }` | viewer |
+| `session.list` | none | viewer |
+| `session.archive` | `{ sessionId? }` | operator |
+| `session.delete` | `{ sessionId? }` | operator |
+| `session.reset` | `{ sessionId? }` | operator |
+| `session.rewind` | `{ sessionId?, historyIndex }` | operator |
+| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` | operator |
+| `scenes.list` | none | viewer |
+| `jobs.list` | none | viewer |
+| `approval.respond` | `{ approvalId, approved }` | operator |
+| `input.respond` | `{ inputId, answer }` | operator |
+| `userInput.respond` | `{ inputId, answer }` | operator |
+| `userInput.hold` | `{ inputId }` | operator |
+| `userInput.preview` | `{ inputId, candidateId }` | operator |
+| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort?, timeZone? }` | operator |
+| `chat.cancel` | `{ requestId }` | operator |
+| `audit.subscribe` / `audit.unsubscribe` | none | viewer |
+| `notifications.subscribe` / `notifications.unsubscribe` | none | viewer |
+| `computer.list_sessions` | none | viewer |
+| `computer.emergency_stop` | `{ computerSessionId, reason? }` | operator |
+| `computer.heartbeat` | `{ computerSessionId }` | operator |
+| `computer.request_screenshot` | `{ computerSessionId }` | operator |
 
-`gateway.status` with a `requestId` adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
+Roles compare by rank, as on the REST routes (viewer 10, operator 50, admin 90; an extension role ranks where its manifest puts it), against the role the account store holds at the time of the call. A refused call runs nothing of the method and answers the RPC error `Forbidden: <method> requires role <role>`; it is audited as `rbac_denied` (`surface: "rpc"`), at most once per connection, method and minute. So a viewer reads its own sessions, the catalogue and its event streams, and starts no session and no turn, as the REST gate already refuses it every mutating route. A core extension can change a method's role with `rpcPolicies` ([forking.md](forking.md)). A method the protocol does not have answers `Unknown method: <method>`. With auth off every method is open, as before.
+
+The `computer.*` methods follow the rules of the `/api/computer-sessions` routes (see [Computer-Use And Browser Sessions](#computer-use-and-browser-sessions)), after the method roles above. `computer.list_sessions` answers `{ sessions }`, scoped as the REST listing is. `computer.request_screenshot`, `computer.heartbeat` and `computer.emergency_stop` change something, so they need operator rank like every such method: a viewer is refused all three with `Forbidden: <method> requires role operator`, for its own sessions too, and neither stops nor keeps alive a session over the socket. `computer.request_screenshot` pushes a `computer.screenshot` event with a fresh frame to the caller, and only for an active session the caller may use (its own, or any for an admin); any other id answers `{ ok: false, error: "No active session: <id>" }`. `computer.heartbeat` answers `{ ok: false, error: "Session not found: <id>" }` for a session the caller may not use or that does not exist. `computer.emergency_stop` stops any session, whoever's chat started it: an emergency stop is a safety control for whoever sees a runaway agent. A role below operator that an extension's `rpcPolicies` opens one of these methods to meets the same session rules, and stops only a session of its own (otherwise `Operator role required for this action`).
+
+`gateway.status` answers `{ status, sessions, uptime }`. `sessions` counts the active sessions the caller may see, as `session.list` scopes them: every one for an admin or a connection without a user, otherwise its own and those without an owner (it used to count every account's). With a `requestId` it adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
+
+`session.create` takes `channel` (default `webchat`) as 1 to 64 characters of `A-Za-z0-9:_.-`; any other is refused with the RPC error `Invalid channel`. The channel `scene` is refused too (`Invalid channel: scene is reserved for scene and job runs`): the scene worker runs a scene's or job's own task text there, and the input guardrail only flags prompt injection in that text instead of blocking it. The trust is the task's alone: a `chat.send` into such a session (its owner may send one while the run lasts) is screened like any other message.
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
+
+`--auto` grants the turn's approvals without asking, except two: a scene's `humanInLoopSteps` step still goes to a person (next paragraph), and a call to a tool with an approval policy to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). So it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
+
+A `/run` of a scene that names an `approvalChannel` sends the scene's `humanInLoopSteps` to that channel, as a REST run of the scene does, and the socket gets a `status` event with `status: "guardrail"` and `message: "Approval requested via <channel>"` instead of an `agent.approval_needed` card. The turn's other approvals still come to the socket. `--auto` answers those other approvals, never a `humanInLoopSteps` step.
 
 `--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
 
@@ -613,7 +674,7 @@ Supported RPC methods:
 }
 ```
 
-- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
+- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, `--auto` below its role floor, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
 - `unreadSteering` is present only when this start retired steering messages that earlier turns of the session never read (see [Mid-turn steering](#mid-turn-steering)), and only for the session owner or an admin. It has the same shape as in `session.get`. The web stops a turn with `chat.cancel` and only then sends the next message; a stopped turn that finished unwinding in between would otherwise have its leftovers dropped by this start without anyone seeing them.
 - A turn already running on the session is superseded, whichever connection started it: it is aborted and reports its own leftovers on its own final `status`. The new turn runs alone on the history.
 - A `requestId` that a running turn still uses is refused with the RPC error `requestId <id> is already in use by a running turn`, before anything is sent under it.
@@ -693,6 +754,8 @@ During `chat.send`, the gateway emits streamed events:
 | `agent.tool_done` | tool name and truncated result |
 | `agent.swarm` | live swarm state snapshot |
 | `agent.approval_needed` | approval id, tool name, and args |
+| `agent.approval_pending` | a call waits for someone else's approval (a tool's approval policy routed it): `{ requestId, approvalId, toolName, approverRoles, distinctApprover, expiresAt }`; nothing to answer here |
+| `agent.approval_resolved` | an approval card or a routed approval is settled: `{ requestId, approvalId, outcome }`, `outcome` being `approved`, `denied` or `timeout`, or for a routed approval also `cancelled` (its turn stopped) |
 | `agent.input_needed` | an `ask_user` question: `{ requestId, inputId, question, choices, timeoutMs, expiresAt }`, answered with `input.respond` |
 | `agent.steering_consumed` | the turn read queued steering messages (see [Mid-turn steering](#mid-turn-steering)) |
 | `agent.user_input_needed` | a structured question from a tool (see [Structured user input](#structured-user-input)) |
@@ -827,7 +890,9 @@ Body:
 { "sessionId": "...", "message": "Summarise the quarterly report" }
 ```
 
-`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
+`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`, and so does one only the durable session store holds (another gateway instance's), which the request leaves as it was. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
+
+Under multi-user auth a turn takes the operator rank, as a mutating `/api` call does: a caller whose role ranks below `operator` (a `viewer`, or an extension role below rank 50) gets `403` with `{ "error": "Operator role required for this action" }`, audited as `rbac_denied` with `surface: "agui"`. With auth off no role is checked.
 
 It emits the same logical event types used by the WebSocket flow.
 
@@ -872,6 +937,8 @@ Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
+This is the legacy in-process route. It is deprecated in favour of `tasks/send` at `/a2a/v1` ([below](#public-a2a-surface)), and the gateway logs a warning the first time it serves it. It is served whatever `a2a.enabled` says. Set `a2a.legacyAgentRoute: false` to turn it off; every request then gets `404` with the JSON-RPC error `-32601` `Method not found`, before the token is looked at.
+
 The current method name is `tasks/send`.
 
 Request:
@@ -891,7 +958,9 @@ Request:
 
 `sessionId` names the session the run works in: the run reads and writes that session's shared facts, peer messages and checkpoints. Leave it out and the run gets a new session of its own. With auth off the id is used as given, so it can name a chat session. Under multi-user auth (`auth.enabled`) it names a session in the caller's own namespace instead, derived from the caller's account and the id: the same id from the same account reaches the same session on this route and on `tasks/send` at `/a2a/v1`, and it never joins an existing chat session, the caller's own included. The response does not carry the session id.
 
-Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`.
+Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`. Running an agent takes the operator rank, as a mutating `/api` call does: a role below `operator` gets `403` with the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a_legacy"`.
+
+`params.autoApprove: true` grants the run's approval-gated tool calls without asking anyone, except two: a scene's `humanInLoopSteps` step, which the run reaches through `run_workflow`, still goes to the scene's `approvalChannel` and is refused when the scene names none (there is nobody to ask here); and a call to a tool with an approval policy still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
 
 Response:
 
@@ -912,6 +981,10 @@ Calling any other method returns `-32601` with `Method not found — use tasks/s
 
 `POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`, and a `tasks/send` task runs as the account the token names, with the workspace root and memory that account's chat runs have. A caller with the shared bearer or an OIDC peer's token is no account of this deployment, and its task runs in the shared workspace root. Under multi-user auth a `tasks/send` `sessionId` that is not a string gets the JSON-RPC error `-32602`.
 
+Under multi-user auth `tasks/send` with a gateway token takes the operator rank: an account whose role ranks below `operator` gets the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a"`. The shared bearer and an OIDC peer's token are machine callers the operator configured and have no role to check. `tasks/get` takes any caller and returns only that caller's own tasks, as before.
+
 ## MCP server
 
 `/mcp` serves the MCP streamable HTTP transport when `mcp.expose.enabled` and `mcp.expose.http.enabled` are set. With `mcp.expose.http.requireAuth` (the default) it takes a gateway token, in the `Authorization` header or a `?token=` query parameter. Under multi-user auth the token's account is looked up on every request, as on `/api`: a token whose account has been removed gets `401`, and a caller has the role its account has now, not the one the token was signed with. Calls run as that account, with the workspace root and memory its chat runs have. An `mcp-session-id` is served only to the account that opened the session; any other caller gets `404` with `Unknown MCP session`, the reply an unknown id gets. With `requireAuth` off every caller is anonymous, with the operator role, and its calls run in the shared workspace root.
+
+A caller below the operator rank, such as a `viewer`, may call Tier-0 tools only, and no agent or scene. Some Tier-0 tools read or move the shared automation browser, which may be signed in to sites; see [Security Model](security.md#roles-on-the-surfaces-outside-api) before serving `/mcp` to viewers.

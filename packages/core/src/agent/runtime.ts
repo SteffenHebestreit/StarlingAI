@@ -24,7 +24,7 @@ import { assembleTurnSystemMessages, buildDirectiveAgentPrompt, turnIsStillDisco
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, autoApprovingCallback, type ApprovalCallback, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, buildQaVerdictInstruction, QA_VERDICT_SYSTEM_PROMPT, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
@@ -1205,10 +1205,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // So is the turn id, which every turn has: the chat's request id, the one a gateway set around
     // this call, or the enclosing turn's for a nested one; a fresh one for a turn nobody named.
     const turnId = userInput?.turnId ?? currentRequestContext()?.turnId ?? randomUUID();
+    const onApprovalPending = opts.onApprovalPending ?? currentRequestContext()?.onApprovalPending;
+    const sender = opts.sender ?? currentRequestContext()?.sender;
     // The person's language, for fixed text only (status lines, backstop messages). Inherited by a
     // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
     const userMessageLanguage = currentRequestContext()?.userMessageLanguage
       ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
+    // The role of the person the turn answers to: the session's own, else the enclosing work's (a
+    // workflow step's nested turn runs on a session of its own, which no sign-in created). Every
+    // delegation the turn makes inherits it from the context (RequestContext.callerRole).
+    const callerRole = opts.session.userRole ?? currentRequestContext()?.callerRole;
     intentShadow = intentShadowTurnStarted({
       sessionId: opts.session.id,
       turnId,
@@ -1239,6 +1245,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         agentName: "main",
         callSite: "main_turn",
         ...(userInput ? { userInput } : {}),
+        ...(callerRole ? { callerRole } : {}),
         turnId,
         // Not inherited: a nested turn writes to its own session, which no chat.send started.
         ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
@@ -1247,6 +1254,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         ...(opts.userWords !== undefined ? { userWords: opts.userWords } : {}),
         // Inherited: a turn nested in an eval turn is eval traffic too.
         ...(opts.session.channel === "eval" || currentRequestContext()?.evalTraffic ? { evalTraffic: true as const } : {}),
+        // Inherited too: a specialist's or a workflow step's call that waits for an approver is
+        // shown in the chat that asked (approval/routed.ts), and is asked for by the person who
+        // sent that chat's message (tools/registry.ts approveUnderPolicy).
+        ...(onApprovalPending ? { onApprovalPending } : {}),
+        ...(sender ? { sender } : {}),
       },
       () => runWithPhaseTimings(async () => {
         // Progress messages (agent/turn-progress.ts): only for a surface that shows them live, and
@@ -1899,7 +1911,7 @@ async function _runTurn(
   if (budgetBlocked) return budgetBlocked;
 
   // ── Input guardrail ───────────────────────────────────────────────────────
-  const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents);
+  const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents, opts._trustedWorkflowInput === true);
   if (inputBlocked) return inputBlocked;
 
   // ── Build message history + deterministic assistant-rename persistence ──────
@@ -2345,8 +2357,13 @@ async function _runTurn(
   // its own contextWindow, and passing the raw default made the trimmer budget
   // against a window the turn is not actually running on.
   session.setContextWindow(applyActiveModelPreset(getConfig().agents.defaults.model).contextWindow);
-  const resolvedApprovalCallback = opts.autoApprove
-    ? async (_toolName: string, _args: Record<string, unknown>) => true
+  // --auto answers the approvals of this turn's tools itself, except a humanInLoopSteps step, which
+  // is enforced unconditionally (tools/registry.ts): that one goes to the caller's callback, and
+  // with none it is refused. Sub-agents and nested workflow turns inherit this callback with their
+  // own steps added. executeTool marks a step as one (ApprovalRequest) and this callback passes it
+  // on marked, so an outer --auto callback does not answer it either.
+  const resolvedApprovalCallback: ApprovalCallback | undefined = opts.autoApprove
+    ? autoApprovingCallback(opts.approvalCallback, opts.humanInLoopSteps)
     : opts.approvalCallback;
 
   const carriedSwarmTasks = loadPreviousTurnSwarmTasks(session.getHistory());
@@ -2365,7 +2382,9 @@ async function _runTurn(
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
     identity: session.identity(),
-    userRole: session.userRole,
+    // The session's role, else the one the turn inherited (runTurn): a workflow step's nested turn
+    // runs on a session no sign-in created, and its tools answer to the person who started it.
+    userRole: session.userRole ?? currentRequestContext()?.callerRole,
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
     // continue on your stated assumption". Before, the tool refused and the model looped on it.

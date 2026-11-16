@@ -50,6 +50,7 @@ describe("failed tool calls inside a delegated run", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-specialist-failures-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         image_creator: {
           description: "Draws pictures.",

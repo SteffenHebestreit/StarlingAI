@@ -49,6 +49,7 @@ describe("generate_image is never served from a cache", () => {
     const dir = mkdtempSync(join(tmpdir(), "sai-render-twice-"));
     const configPath = join(dir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: dir,
       subAgents: {
         painter: { description: "Paints.", systemPrompt: "Paint.", tools: ["generate_image"], maxIterations: 5 },
       },

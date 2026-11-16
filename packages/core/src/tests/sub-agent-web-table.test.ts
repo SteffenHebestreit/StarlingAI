@@ -59,6 +59,7 @@ async function runProbe(responses: unknown[], options: { maxIterations: number; 
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-web-table-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     ...(options.orchestration ? { orchestration: options.orchestration } : {}),
     subAgents: {
       [AGENT]: {
@@ -249,6 +250,7 @@ describe("web_table in a sub-agent run", () => {
   it("delegate_to_agent passes the computed keys up in its metadata", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-web-table-delegate-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: { [AGENT]: { description: "Probe specialist that reads web tables.", systemPrompt: "Read the tables, then answer.", tools: ["web_table"], maxIterations: 4 } },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");

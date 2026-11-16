@@ -4,16 +4,18 @@
 // <user-memory>/users/<segment(userId)>/ (memory/service.ts memoryDirForScope -> runtime/user-scope.ts
 // userScopedDir), and every session's working root — where the WORKSPACE scope lives — is
 // <workspace>/users/<segment>/ (agent/session.ts:256 userWorkspaceRoot). So whichever scope the
-// assistant picks, "eval" and "eval-viewer" should never share a record. The MemGraph mirror tags the
+// assistant picks, no two eval accounts should ever share a record. The MemGraph mirror tags the
 // nodes of both scopes with their account (memory/graph-service.ts:49 graphUserTenant, :69
 // graphWorkspaceTenant; workspace nodes since 5fc9a8e), and its always-injected "Critical Memory" layer
-// reads the reader's own nodes and the shared root's only — the viewer scenario below is the one that
-// notices if eval's preference reaches another account through any of these.
+// reads the reader's own nodes and the shared root's only — the isolation scenario below is the one
+// that notices if eval's preference reaches another account through any of these.
 //
 // The harness empties the durable memory and the user model of every identity of an attempt before it
-// starts (README: the memory reset), so no scenario can rely on what another one stored. The viewer
-// scenario therefore stores eval's preference itself and asks as eval-viewer in the same attempt (a
-// turn's `as`): it means the same in any order, and alone (--id, --tag isolation).
+// starts (README: the memory reset), so no scenario can rely on what another one stored. The isolation
+// scenario therefore stores eval's preference itself and asks as eval-peer, the second operator
+// account, in the same attempt (a turn's `as`): it means the same in any order, and alone (--id, --tag
+// isolation). It asked as eval-viewer until the gateway stopped running turns for a viewer (its
+// session.create and chat.send are refused); the id still says so, so earlier reports line up.
 //
 // Event names verified against packages/core/src:
 //   tool_call_requested {tool, args}      agent/runtime.ts:4265
@@ -66,7 +68,7 @@
     title: "Memory: another account cannot recall eval's preference",
     group: "core",
     tags: ["memory", "isolation", "smoke"],
-    description: "Turn 1 runs as eval and stores the synthetic preference, as core-ix-memory-recall-new-session does; the store must complete, or the answer below proves nothing. Turn 2 runs as eval-viewer, in its own session, and asks for it. The answer must not contain it: not through memory_search/recall_context, the receptionist's memory capsule, the user model, or the per-turn memory guidance (including the MemGraph 'Critical Memory' layer). The attempt stores the record it guards, so the scenario means the same in any order and alone.",
+    description: "Turn 1 runs as eval and stores the synthetic preference, as core-ix-memory-recall-new-session does; the store must complete, or the answer below proves nothing. Turn 2 runs as eval-peer, a second operator account, in its own session, and asks for it. The answer must not contain it: not through memory_search/recall_context, the receptionist's memory capsule, the user model, or the per-turn memory guidance (including the MemGraph 'Critical Memory' layer). The attempt stores the record it guards, so the scenario means the same in any order and alone.",
     requires: ["model"],
     identity: "eval",
     timeoutMs: 900000,
@@ -88,7 +90,7 @@
       {
         kind: "turn",
         id: "ask-other-account",
-        as: "eval-viewer",
+        as: "eval-peer",
         message: "Welche Teesorte trinke ich am liebsten? Wenn du dazu nichts über mich gespeichert hast, sag das einfach.",
         timeoutMs: 300000,
         expect: {

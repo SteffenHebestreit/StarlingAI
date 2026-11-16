@@ -82,9 +82,9 @@ interface TurnContext {
 
 type TurnScript = (turn: TurnContext) => Promise<void>;
 
-const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ", alice: "pw-alice-0123456789abcdefXYZ" };
+const PASSWORDS = { eval: "pw-eval-0123456789abcdefXYZ", "eval-viewer": "pw-viewer-0123456789abcdefXYZ", "eval-peer": "pw-peer-0123456789abcdefXYZ", alice: "pw-alice-0123456789abcdefXYZ" };
 /** alice: an account of the deployment that is not an eval account. */
-const ROLES: Record<string, "operator" | "viewer"> = { eval: "operator", "eval-viewer": "viewer", alice: "operator" };
+const ROLES: Record<string, "operator" | "viewer"> = { eval: "operator", "eval-viewer": "viewer", "eval-peer": "operator", alice: "operator" };
 
 type MemoryScope = "user" | "workspace";
 
@@ -1130,12 +1130,20 @@ describe("e2e harness against a fake gateway", () => {
     ]);
   });
 
-  it("checks that eval-viewer cannot recall eval's preference with that preference in place, whatever ran before", async () => {
+  it("checks that another account cannot recall eval's preference with that preference in place, whatever ran before", async () => {
     // The isolation scenario passed without testing anything when the memory scenario had not run
     // just before it (--id, --tag isolation): every eval attempt empties eval's memory first.
     const paths = resolveE2EPaths();
     const { selected } = filterScenarios(loadScenarios(paths.scenariosDir, paths.fixturesDir).scenarios, { tags: ["isolation"] });
     expect(selected.map((entry) => entry.scenario.id)).toEqual(["core-ix-memory-viewer-isolation"]);
+    // The second account asks as eval-peer, an operator: the gateway runs no turn for a viewer.
+    expect(selected[0]!.scenario.steps.flatMap((step) => step.kind === "turn" && step.as ? [step.as] : [])).toEqual(["eval-peer"]);
+    const peerClient = new GatewayClient({
+      baseUrl: gateway.url,
+      credentials: { ...credentials(), "eval-peer": { username: "eval-peer", password: PASSWORDS["eval-peer"] } },
+      rpcTimeoutMs: 5_000,
+      connectTimeoutMs: 5_000,
+    });
     const store: TurnScript = async (turn) => {
       turn.audit("tool_call_requested", { tool: "memory_store", args: { scope: "user" } });
       gateway.remember(turn.user, "user", "lieblingstee", "Lieblingsteesorte: Polarstern-Rooibos");
@@ -1148,24 +1156,28 @@ describe("e2e harness against a fake gateway", () => {
       turn.finish("ok", known.length > 0 ? `Gespeichert ist: ${known.join("; ")}` : "Dazu habe ich nichts über dich gespeichert.");
     };
 
-    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("leaks") }]);
-    const leaking = await runScenarios(selected, deps(), FAST);
-    expect(leaking[0]!.status).toBe("failed");
-    expect(leaking[0]!.attempts[0]!.failures).toEqual(['step 2 turn "ask-other-account": reply.excludes "Polarstern": found']);
+    try {
+      gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("leaks") }]);
+      const leaking = await runScenarios(selected, deps({ client: peerClient }), FAST);
+      expect(leaking[0]!.status).toBe("failed");
+      expect(leaking[0]!.attempts[0]!.failures).toEqual(['step 2 turn "ask-other-account": reply.excludes "Polarstern": found']);
 
-    gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("holds") }]);
-    const holding = await runScenarios(selected, deps(), FAST);
-    expect(holding[0]!.attempts[0]!.failures).toEqual([]);
-    expect(holding[0]!.status).toBe("passed");
+      gateway.setScripts([{ match: /merke dir/i, run: store }, { match: /Teesorte/i, run: recall("holds") }]);
+      const holding = await runScenarios(selected, deps({ client: peerClient }), FAST);
+      expect(holding[0]!.attempts[0]!.failures).toEqual([]);
+      expect(holding[0]!.status).toBe("passed");
 
-    // The remember turn answers without storing: the viewer has nothing to leak, so a pass would
-    // prove nothing. The store must complete, or the attempt fails right there.
-    gateway.setScripts([{ match: /merke dir/i, run: async (turn) => turn.finish("ok", "Gemerkt.") }, { match: /Teesorte/i, run: recall("leaks") }]);
-    const unstored = await runScenarios(selected, deps(), FAST);
-    expect(unstored[0]!.status).toBe("failed");
-    expect(unstored[0]!.attempts[0]!.failures).toEqual([
-      'step 1 turn "remember": events.must tool_call_completed{data.tool in [memory_store, user_model_update]}: expected ≥1, saw 0',
-    ]);
+      // The remember turn answers without storing: the other account has nothing to leak, so a pass
+      // would prove nothing. The store must complete, or the attempt fails right there.
+      gateway.setScripts([{ match: /merke dir/i, run: async (turn) => turn.finish("ok", "Gemerkt.") }, { match: /Teesorte/i, run: recall("leaks") }]);
+      const unstored = await runScenarios(selected, deps({ client: peerClient }), FAST);
+      expect(unstored[0]!.status).toBe("failed");
+      expect(unstored[0]!.attempts[0]!.failures).toEqual([
+        'step 1 turn "remember": events.must tool_call_completed{data.tool in [memory_store, user_model_update]}: expected ≥1, saw 0',
+      ]);
+    } finally {
+      peerClient.close();
+    }
   });
 
   it("empties the identity's user model before the attempt's first turn, which recall_context serves", async () => {
@@ -1627,18 +1639,18 @@ describe("e2e harness — setup (temp config only)", () => {
     expect(Object.keys(shard)).toEqual(["auth"]);
     expect(Object.keys(shard.auth)).toEqual(["users"]);
     const users = shard.auth["users"] as Array<{ username: string; role: string; passwordHash: string }>;
-    expect(users.map((user) => [user.username, user.role])).toEqual([["eval", "operator"], ["eval-viewer", "viewer"]]);
+    expect(users.map((user) => [user.username, user.role])).toEqual([["eval", "operator"], ["eval-viewer", "viewer"], ["eval-peer", "operator"]]);
     const stored = JSON.parse(credentialsText) as Record<string, { username: string; password: string }>;
-    for (const [identity, user] of [["eval", users[0]!], ["eval-viewer", users[1]!]] as const) {
+    for (const [identity, user] of [["eval", users[0]!], ["eval-viewer", users[1]!], ["eval-peer", users[2]!]] as const) {
       const password = stored[identity]!.password;
       expect(password.length).toBeGreaterThanOrEqual(24);
       expect(await bcrypt.compare(password, user.passwordHash)).toBe(true);
       expect(shardText).not.toContain(password);
       expect(logs.join("\n")).not.toContain(password);
     }
-    // The mail-service overlay that keeps eval and eval-viewer off every shared mail account.
+    // The mail-service overlay that keeps every eval account off every shared mail account.
     const isolationText = readFileSync(paths.mailIsolationPath, "utf8");
-    expect(JSON5.parse(isolationText)).toEqual({ accounts: [], isolatedUsers: ["eval", "eval-viewer"] });
+    expect(JSON5.parse(isolationText)).toEqual({ accounts: [], isolatedUsers: ["eval", "eval-viewer", "eval-peer"] });
 
     const kept = await runE2ESetup({ paths, build });
     expect(kept.action).toBe("kept");
@@ -1684,7 +1696,7 @@ describe("e2e harness — setup (temp config only)", () => {
     for (const user of kept) expect(user["id"]).toMatch(ACCOUNT_ID_RE);
     expect(kept[0]!["id"]).not.toBe(kept[1]!["id"]);
     expect(readFileSync(credentialsPath, "utf8")).toBe(credentialsText);
-    expect(logs.join("\n")).toContain("gave eval and eval-viewer an account id, passwords unchanged");
+    expect(logs.join("\n")).toContain("gave eval, eval-viewer and eval-peer an account id, passwords unchanged");
     const stored = JSON.parse(credentialsText) as Record<string, { password: string }>;
     expect(await bcrypt.compare(stored["eval"]!.password, String(kept[0]!["passwordHash"]))).toBe(true);
 
@@ -1692,6 +1704,32 @@ describe("e2e harness — setup (temp config only)", () => {
     const shardText = readFileSync(paths.shardPath, "utf8");
     expect((await runE2ESetup({ paths, build })).action).toBe("kept");
     expect(readFileSync(paths.shardPath, "utf8")).toBe(shardText);
+  });
+
+  it("adds an account the files lack and keeps the others as they are, ids and passwords included", async () => {
+    // A setup from before eval-peer joined the harness: eval and eval-viewer only. Written anew, eval
+    // would get a new id, and with it new storage, and both new passwords.
+    const paths = setupPaths();
+    expect((await runE2ESetup({ paths, build })).action).toBe("created");
+    const readUsers = () => (JSON5.parse(readFileSync(paths.shardPath, "utf8")) as { auth: { users: Array<Record<string, unknown>> } }).auth.users;
+    const readCredentials = () => JSON.parse(readFileSync(credentialsPath, "utf8")) as Record<string, { username: string; password: string }>;
+    const before = readUsers().filter((user) => user["username"] !== "eval-peer");
+    const { "eval-peer": _peer, ...olderCredentials } = readCredentials();
+    writeFileSync(paths.shardPath, JSON.stringify({ auth: { users: before } }));
+    writeFileSync(credentialsPath, JSON.stringify(olderCredentials));
+
+    const logs: string[] = [];
+    expect((await runE2ESetup({ paths, build, log: (line) => logs.push(line) })).action).toBe("created");
+    const after = readUsers();
+    expect(after.map((user) => user["username"])).toEqual(["eval", "eval-viewer", "eval-peer"]);
+    expect(after.slice(0, 2)).toEqual(before);
+    const credentialsAfter = readCredentials();
+    expect({ eval: credentialsAfter["eval"], "eval-viewer": credentialsAfter["eval-viewer"] }).toEqual(olderCredentials);
+    expect(after[2]!["id"]).toMatch(ACCOUNT_ID_RE);
+    expect(after[2]!["role"]).toBe("operator");
+    expect(await bcrypt.compare(credentialsAfter["eval-peer"]!.password, String(after[2]!["passwordHash"]))).toBe(true);
+    expect(logs.join("\n")).toMatch(/Wrote eval-peer \(operator\) to \S*31-e2e\.local\.jsonc, beside eval and eval-viewer as they were;/);
+    expect((await runE2ESetup({ paths, build })).action).toBe("kept");
   });
 });
 

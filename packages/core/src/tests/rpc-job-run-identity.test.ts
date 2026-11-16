@@ -51,7 +51,9 @@ async function queueFromChat(userId: string | undefined, multiUser = false) {
     const account = multiUser && userId ? testAccountId(userId) : undefined;
     const active = session.createSession({ channel: "webchat", ...(userId ? { userId } : {}), ...(account ? { account } : {}) });
     const live = userId && account ? { username: userId, role: "operator", account } : undefined;
-    const connection = new RpcConnection({ readyState: 1, send() {} } as never, userId, userId ? "operator" : undefined, live);
+    // An operator's role either way: under multi-user auth chat.send needs one (gateway/rpc-policy.ts),
+    // and what this pins is the identity a run is stamped with, not who may queue it.
+    const connection = new RpcConnection({ readyState: 1, send() {} } as never, userId, "operator", live);
     await connection.handleMessage(JSON.stringify({
       id: "req-job",
       method: "chat.send",

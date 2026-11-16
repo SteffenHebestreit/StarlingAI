@@ -56,7 +56,7 @@ describe("the declared deliverable reaches the sub-agent run", () => {
   let tempDir = "";
   const ctx = (sessionId: string): ToolContext => ({
     sessionId,
-    workspacePath: "/workspace",
+    workspacePath: tempDir,
     swarmState: freshSwarmState(),
   });
   /** What each runner call received, in call order. */
@@ -65,6 +65,7 @@ describe("the declared deliverable reaches the sub-agent run", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-deliverable-forwarding-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         browser_agent: { description: "Navigates web pages and reads what they show.", systemPrompt: "Browse.", tools: BROWSER_AGENT_TOOLS, maxIterations: 4 },
         summarizer: { description: "Summarizes findings into a short brief.", systemPrompt: "Summarize.", tools: ["read_file"], maxIterations: 4 },

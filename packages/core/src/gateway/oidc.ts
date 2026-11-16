@@ -18,7 +18,7 @@ import { getConfig } from "../config/loader.js";
 import { resolveSecretRef } from "../tools/infrastructure-shared.js";
 import { childLogger } from "../logger.js";
 import type { AuthRole, OidcConfig } from "../config/schema.js";
-import { normalizeRole } from "./auth.js";
+import { declaredRole, reportUndeclaredRole } from "./auth.js";
 
 const log = childLogger("gateway:oidc");
 
@@ -118,11 +118,12 @@ export async function getOidcDiscovery(): Promise<oidc.Configuration> {
   return config;
 }
 
-/** Test-only: drop the cached discovery + service token. */
+/** Test-only: drop the cached discovery + service token, and any pending sign-ins. */
 export function _resetOidcForTests(): void {
   _discovery = null;
   _serviceToken = null;
   _jwks = null;
+  _loginStates.clear();
 }
 
 // ── Human SSO (authorization-code + PKCE) ───────────────────────────────────────
@@ -151,11 +152,35 @@ export function oidcRedirectUri(requestOrigin?: string): string {
 interface LoginStateEntry { codeVerifier: string; createdAt: number; }
 const _loginStates = new Map<string, LoginStateEntry>();
 const LOGIN_STATE_TTL_MS = 600_000; // 10 minutes
+/**
+ * The most sign-ins that can be pending at once. The login route is public and every call stashes
+ * an entry for the TTL, so without a cap anyone could grow the store without bound. Past the cap
+ * the oldest pending sign-in is dropped; its callback then gets the route's 400 and the person
+ * starts over.
+ */
+export const MAX_PENDING_LOGIN_STATES = 10_000;
 
 export function stashLoginState(state: string, codeVerifier: string): void {
-  const cutoff = Date.now() - LOGIN_STATE_TTL_MS;
-  for (const [k, v] of _loginStates) if (v.createdAt < cutoff) _loginStates.delete(k);
-  _loginStates.set(state, { codeVerifier, createdAt: Date.now() });
+  const now = Date.now();
+  // A Map iterates in insertion order, which is creation order (a re-stash is moved to the back
+  // below), so the expired entries sit at the front: the sweep stops at the first live one rather
+  // than walking the whole store on every login.
+  for (const [k, v] of _loginStates) {
+    if (now - v.createdAt <= LOGIN_STATE_TTL_MS) break;
+    _loginStates.delete(k);
+  }
+  _loginStates.delete(state);
+  while (_loginStates.size >= MAX_PENDING_LOGIN_STATES) {
+    const oldest = _loginStates.keys().next();
+    if (oldest.done) break;
+    _loginStates.delete(oldest.value);
+  }
+  _loginStates.set(state, { codeVerifier, createdAt: now });
+}
+
+/** Test-only: how many sign-ins are pending. */
+export function _pendingLoginStatesForTests(): number {
+  return _loginStates.size;
 }
 
 /** Consume the stored verifier for `state` (single-use). Null if missing/expired. */
@@ -236,20 +261,32 @@ export function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIde
   }
   const roles = extractRoles(claims, cfg.rolesClaim);
   const role = mapRole(cfg, roles);
+  if (!role && cfg.roleMapping.defaultRole) {
+    // mapRole logged the role. The person is not named: the refusal is the configuration's.
+    throw new Error("OIDC sign-in refused: no mapped role, and roleMapping.defaultRole is a role that neither core nor any loaded extension declares");
+  }
   if (!role) throw new Error(`OIDC user '${username}' has no mapped role (${roles.join(", ") || "no roles"}) and no defaultRole`);
   const displayName = pickClaim(claims, "name") ?? pickClaim(claims, "preferred_username");
   const email = pickClaim(claims, "email");
   return { username, role, displayName, email, issuer, subject };
 }
 
-/** admin → operator → viewer (most-privileged listed role wins); else defaultRole. */
+/**
+ * admin → operator → viewer (most-privileged listed role wins); else defaultRole. A defaultRole
+ * that neither core nor any loaded extension declares (a typo, or the role of an extension that
+ * failed to load) maps nobody: null, and logged. It mapped to operator, so every person the IdP
+ * granted none of the listed roles signed in as an operator.
+ */
 export function mapRole(cfg: OidcConfig, roles: string[]): AuthRole | null {
   const has = (list: string[]) => list.some((r) => roles.includes(r));
   const m = cfg.roleMapping;
   if (has(m.admin)) return "admin";
   if (has(m.operator)) return "operator";
   if (has(m.viewer)) return "viewer";
-  return m.defaultRole ? normalizeRole(m.defaultRole) : null;
+  if (!m.defaultRole) return null;
+  const role = declaredRole(m.defaultRole);
+  if (!role) reportUndeclaredRole(m.defaultRole, { source: "auth.oidc.roleMapping.defaultRole" });
+  return role ?? null;
 }
 
 /** Read a possibly dotted claim path (e.g. "realm_access.roles") as a string. */

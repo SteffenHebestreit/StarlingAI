@@ -203,7 +203,9 @@ Internal orchestration tools stay inside the guarded runtime, so they do not nee
 
 `get_site_credentials` is Tier 0 because it returns metadata only. The secret-bearing actions stay approval-gated through `site_fill_credentials` and `computer_type_credential`.
 
-### Tier 3 — Privileged (Admin Approval + Audit)
+### Tier 3 — Privileged (Per-Call Approval + Audit)
+
+The tier says that a call needs approval, not who gives it. Without an [approval policy](#who-may-approve-a-call-approval-policies) the approval goes wherever the call's approval callback reaches: in a chat, that is the person who asked.
 
 | Tool | Description | Approval |
 |------|-------------|---------|
@@ -257,7 +259,63 @@ Messages that trigger the scanner are rejected with a `blocked` status event. Th
 
 ### Layer 2 — Tool Tier Check
 
-Runs before any tool is executed. Enforces the tier table above. Per-call approval requests are routed to the configured approval channel (Slack or webhook) and block execution until approved or denied. Denied tool calls are logged.
+Runs before any tool is executed. Enforces the tier table above. A per-call approval request blocks execution until it is approved or denied, and a denied call is logged. Where the request goes depends on the run: a chat turn shows an approval card on the requester's own socket; a scene or job run sends it to the scene's approval channel (Slack or a webhook). A tool with an approval policy decides this itself (next section).
+
+### Who may approve a call: approval policies
+
+A tool that requires per-call approval can name the roles that may grant it. Core tools declare none. An extension declares a policy on its tool (see [Forking](forking.md#3-add-your-domain-backend-as-a-core-extension)):
+
+```ts
+{ name: "record_export", tier: ToolTier.THREE_PRIVILEGED, requiresPerCallApproval: true,
+  approval: { approverRoles: ["reviewer"], distinctApprover: true }, /* ... */ }
+```
+
+- **`approverRoles`**: role names as JWT `role` claims carry them, matched like route policies (`policyAdmitsRole`): a listed name, and among the built-in roles every higher one (`operator` admits `admin`). An extension role is never admitted through rank.
+- **`distinctApprover`**: a second person must approve. The requester never decides their own call, whatever their role.
+
+The requester is the person who sent the message: the signed-in caller of the chat socket or of the AG-UI request, with the role they hold now. Sub-agent and workflow calls inherit them. This is not always the session's owner and its stored role. A session keeps the role it was created with, and an admin may drive another account's chat. Where nobody sent a message (a job, A2A, MCP), the requester is the call's own identity and role.
+
+`executeTool` keeps the requester's own approval card only when all of these hold:
+
+- a person sent the message, and the chat is their own. An admin driving another account's chat is routed, and is recorded as the one who asked;
+- the policy admits the role they hold when the call is made. An unknown role is admitted by no policy;
+- no second person is required;
+- the turn is not running with `--auto`; and
+- the callback is the chat's own approval card. A callback that answers by itself never grants such a call: `--auto`, the legacy A2A route's `autoApprove`, a scene's approval channel.
+
+Their role is read again when they answer the card. A requester who no longer holds an approver role then does not grant the call.
+
+Every other call is **routed**:
+
+1. It waits in the approval store as a `routed` entry with no secret.
+2. The approvers get a notification. Only connections whose role the policy admits receive it.
+3. The requester's chat shows `agent.approval_pending`, with no answer button.
+4. `GET /api/approvals/pending` lists the entry only to callers the policy admits, and with `distinctApprover` not to the requester. A viewer's list is empty.
+5. `POST /api/approval/:id` decides it for a signed-in approver only. Any other signed-in caller gets `403`, and the requester under `distinctApprover` gets `403 A second person must approve this request`. The one-click link, the approval secret and a request without a session get the answer an unknown id gets (`404`).
+6. With no decision within `approvals.routedTimeoutMs` (default: `gateway.approvalTimeoutMs`), the call is denied. A stopped turn withdraws its request.
+7. While it waits, the run's clocks hold, as they do for an `ask_user` question: the turn deadline, the chat's watchdog and a sub-agent's deadline. Each is credited the wait's length afterwards. So `routedTimeoutMs` bounds the wait, not what is left of the turn's budget. The turn's 24-hour ceiling still applies.
+
+The tool's handler learns how the call was approved from `ctx.approval`:
+
+- `{ via: "requester", approvedBy, approverRole }` when the requester approved on their own card: who they are, and their role when they answered.
+- `{ via: "routed", approvalId, approvedBy, approverRole }` when an approver decided it.
+
+Calls of tools without a policy run with their context unchanged, except that a call made from inside a policy tool's handler does not inherit its `ctx.approval`. The audit log records `approval_routed_requested` (tool, approval id, approver roles, requester) and `approval_routed_resolved` (who decided, with which role, or how the wait ended), never the arguments.
+
+`executeTool` (`tools/registry.ts`) checks a call in this order, and the first check that says no ends it:
+
+1. Tier 4 (Blocked) and unregistered names are refused.
+2. Every core extension's `authorizeToolCall` hook, in load order. A refusal is audited as `tool_call_refused` (tool, role, extension; never the arguments). A hook that throws refuses the call.
+3. A tool that claims `requiresSandbox` without a sandboxed execution path is refused.
+4. The tool's own `refuse` (argument checks).
+5. The effect retry guard (an identical retry of a mutation whose outcome is unknown).
+6. The approval gate: tier `requiresPerCallApproval`, a scene's `humanInLoopSteps`, or the effect policy under `guardrails.effectContracts: "enforce"`.
+
+Steps 2 and 4 come before the approval gate, so nobody is asked to approve a call that would then be refused.
+
+**The caller's role.** `ToolContext.userRole` is the authenticated role of the person a call answers to. A chat turn takes it from its session, and every run the turn starts inherits it through the request context (`RequestContext.callerRole`): sub-agents, workflow steps and their nested turns, ephemeral agents. A2A `tasks/send`, the legacy A2A route and MCP agent and scene calls set it from the signed-in account. A job a person queued, and each run of a schedule a person made with `schedule_task`, records the role it was queued with; the scene worker runs it with the owner's role as the account holds it when the run starts, and fails a job whose owner no longer signs in before it runs. Every claimed job runs in a request context of its own, so nothing reaches it from the work that queued it or woke the worker. Channel messages, configured cron and webhook-key runs, federated peers, and jobs and schedules queued before roles were recorded carry no role. With auth off a surface takes the role from the token: a WebSocket chat and `/job` carry the `role` claim as given (none without one), AG-UI turns and the REST scene and job run routes carry `operator` without one, and A2A and MCP runs carry none. Role-aware tools treat a missing role as before: knowledge-base management and schedules apply no role rule, and under multi-user auth the model switch refuses (with auth off it always allows).
+
+A standalone scene worker (`scene-worker-main.ts`) reads its config and the account registry once, when it starts, and loads no extensions: of each extension it declares only the roles, also when it starts. In a split deployment it checks a job's owner against the accounts as they were then: a demotion or a deletion reaches queued jobs once the worker restarts, and a job queued by an account of an extension's auth provider fails there. A builtin account holding an extension's role runs its jobs there with that role. An extension that does not load in the worker (its module does not import there, or its manifest is refused) declares no role there, so those jobs fail and their schedules end as after any failed runs ([Roles Nobody Declares](security.md#roles-nobody-declares)).
 
 ### Layer 3 — Tool Output Scanner
 

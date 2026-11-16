@@ -3,6 +3,12 @@ import { computed, ref } from "vue";
 
 export type NotificationLevel = "info" | "success" | "warn" | "error";
 
+/** A button on the toast: its label, and what it does. Clicking it also dismisses the toast. */
+export interface NotificationAction {
+  label: string;
+  run: () => void;
+}
+
 export interface BrowserNotificationItem {
   id: string;
   title: string;
@@ -14,6 +20,7 @@ export interface BrowserNotificationItem {
   jobId?: string;
   targetPath?: string;
   sticky?: boolean;
+  action?: NotificationAction;
   source: "server" | "local";
 }
 
@@ -28,6 +35,7 @@ interface NotificationInput {
   jobId?: string;
   targetPath?: string;
   sticky?: boolean;
+  action?: NotificationAction;
   source?: "server" | "local";
 }
 
@@ -93,6 +101,7 @@ export const useNotificationStore = defineStore("notifications", () => {
       jobId: input.jobId?.trim() || undefined,
       targetPath: input.targetPath?.trim() || undefined,
       sticky: input.sticky === true ? true : undefined,
+      action: input.action?.label.trim() ? input.action : undefined,
       source: input.source ?? "local",
     };
 

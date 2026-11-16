@@ -1004,7 +1004,7 @@ function sweepAnomalies(): WardenAlert[] {
     _computerCredentialPrompts.set(csId, recent);
 
     if (recent.length >= COMPUTER_CREDENTIAL_THRESHOLD) {
-      computerSessionManager.emergencyStop(csId, "warden:credential_prompt_loop");
+      computerSessionManager.emergencyStop(csId, { via: "system" }, "warden:credential_prompt_loop");
       const alert = makeAlert(
         "computer_credential_prompt_loop",
         "error",
@@ -1028,7 +1028,7 @@ function sweepAnomalies(): WardenAlert[] {
     _computerClipboardReads.set(csId, recent);
 
     if (recent.length >= COMPUTER_CLIPBOARD_THRESHOLD) {
-      computerSessionManager.emergencyStop(csId, "warden:clipboard_exfiltration");
+      computerSessionManager.emergencyStop(csId, { via: "system" }, "warden:clipboard_exfiltration");
       const alert = makeAlert(
         "computer_clipboard_exfiltration",
         "error",

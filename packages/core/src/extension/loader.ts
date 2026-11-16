@@ -2,12 +2,26 @@
  * Core-extension loader — discovers `src/extensions/<name>/index.{ts,js}`
  * directories at boot, validates their manifests, and registers everything
  * they declare (tools + tiers, audit events, roles, guardrail hooks, routes,
- * lifecycle hooks).
+ * route and RPC policies, lifecycle hooks). The standalone scene worker loads
+ * none of that; it declares only their roles (registerCoreExtensionRoles).
  *
  * Failure semantics mirror the plugin loader: a broken extension is logged +
  * audited (`extension_load_failed`) and skipped; the gateway keeps booting.
  * Extensions are repo code — a compile-time error surfaces in CI long before
- * this loader runs — so runtime failures here are config/IO problems.
+ * this loader runs — so runtime failures here are config/IO problems. A
+ * skipped extension's roles go with it: under multi-user auth an account
+ * holding one of them cannot sign in until the extension loads again or the
+ * account's role is changed (gateway/auth.ts declaredRole; it used to sign in
+ * as operator). So a mistake in one of the parts that decide access does not
+ * skip the extension, which would lock its accounts out over one entry. It is
+ * logged and fails closed instead:
+ *   - a malformed route policy refuses every caller on its path;
+ *   - a malformed RPC policy refuses its method, or every method, to every
+ *     caller;
+ *   - a tool whose `refuse` is not a function, or whose approval policy is
+ *     malformed, is not registered;
+ *   - an `authorizeToolCall` or `authorizeAgentRun` that is not a function
+ *     refuses every tool call or agent run.
  *
  * Discovery root resolution:
  *   1. `SAI_EXTENSIONS_DIR` env var (tests / unusual layouts)
@@ -23,19 +37,23 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { registerTool, type ToolHandler } from "../tools/registry.js";
-import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
+import { registerTool, registerToolCallAuthorizer, type ToolHandler } from "../tools/registry.js";
+import { ToolTier, isBuiltinTool, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
-import { registerRoutePolicies } from "../gateway/route-policies.js";
+import { registerManifestRoutePolicies, routePolicyUnknownRoles } from "../gateway/route-policies.js";
+import { registerManifestRpcPolicies } from "../gateway/rpc-policy.js";
 import { registerExtensionToolKeywords } from "../providers/embeddings.js";
 import { registerLlmBoundaryTransformer } from "../providers/llm-boundary.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
+  _recordExtensionRoles,
   _recordLoadedExtension,
+  listExtensionRoles,
   type CoreExtension,
   type CoreExtensionContext,
   type ExtensionRouteApp,
+  type ExtensionToolDef,
 } from "./index.js";
 
 const log = childLogger("extension-loader");
@@ -95,6 +113,29 @@ function discoverEntryFiles(dir: string): Array<{ name: string; entry: string }>
   return out;
 }
 
+/** Role names as the manifest's own `roles` must spell them. */
+const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_-]{1,32}$/;
+
+/**
+ * What is wrong with a tool's approval policy, or null when it has a well-formed one or none. A
+ * policy goes only on a tool that asks for approval on every call, and names at least one role. The
+ * roles need not be this extension's: built-in ones and another extension's count, and are matched
+ * when a call is decided, by which time every extension has loaded.
+ */
+function approvalPolicyProblem(tool: ExtensionToolDef): string | null {
+  const approval: unknown = tool.approval;
+  if (approval === undefined) return null;
+  if (typeof approval !== "object" || approval === null) return "approval must be an object";
+  const { approverRoles, distinctApprover } = approval as { approverRoles?: unknown; distinctApprover?: unknown };
+  if (tool.requiresPerCallApproval !== true) return "approval needs requiresPerCallApproval: true";
+  if (!Array.isArray(approverRoles) || approverRoles.length === 0) return "approval.approverRoles must list at least one role";
+  for (const role of approverRoles) {
+    if (typeof role !== "string" || !ROLE_NAME_PATTERN.test(role)) return `invalid approver role ${JSON.stringify(role)}`;
+  }
+  if (distinctApprover !== undefined && typeof distinctApprover !== "boolean") return "approval.distinctApprover must be a boolean";
+  return null;
+}
+
 function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExtension {
   if (typeof ext !== "object" || ext === null) throw new Error("default export is not an object");
   const e = ext as Partial<CoreExtension>;
@@ -120,11 +161,23 @@ function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExt
     }
   }
   for (const role of e.roles ?? []) {
-    if (typeof role.name !== "string" || !/^[a-z][a-z0-9_-]{1,32}$/.test(role.name)) {
+    if (typeof role.name !== "string" || !ROLE_NAME_PATTERN.test(role.name)) {
       throw new Error(`invalid role name ${JSON.stringify(role.name)}`);
     }
     if (typeof role.rank !== "number") throw new Error(`role ${role.name}: rank must be a number`);
   }
+}
+
+/**
+ * What keeps one of a manifest's tools from being registered, or null. A mistake in a part of the
+ * tool that decides whether a call may run fails closed (see the module comment): the tool is left
+ * out, so nothing calls it until the mistake is fixed, and the rest of the extension loads.
+ */
+function toolProblem(tool: ExtensionToolDef): string | null {
+  if (tool.refuse !== undefined && typeof tool.refuse !== "function") return "refuse is not a function";
+  // Registered without its policy, the tool would ask whoever its callback reaches; with a policy no
+  // one can satisfy, every call would wait for an approver who never comes.
+  return approvalPolicyProblem(tool);
 }
 
 function registerExtension(ext: CoreExtension, source: string): void {
@@ -132,8 +185,12 @@ function registerExtension(ext: CoreExtension, source: string): void {
   // name without warnings.
   registerExtensionGroup(ext.name);
 
-  if (ext.routePolicies?.length) {
-    registerRoutePolicies(ext.name, ext.routePolicies);
+  // A malformed policy does not fail the load: the extension's roles would go with it, and every
+  // account holding one of them would be locked out (a role nobody declares signs nobody in). It is
+  // logged, and refuses every caller on its path instead (route-policies.ts
+  // registerManifestRoutePolicies).
+  for (const problem of registerManifestRoutePolicies(ext.name, ext.routePolicies)) {
+    log.error({ extension: ext.name, problem }, "extension route policy is malformed");
   }
 
   if (ext.toolKeywords?.length) {
@@ -146,6 +203,11 @@ function registerExtension(ext: CoreExtension, source: string): void {
 
   const toolNames: string[] = [];
   for (const tool of ext.tools ?? []) {
+    const problem = toolProblem(tool);
+    if (problem) {
+      log.error({ extension: ext.name, tool: tool.name, problem }, "extension tool is malformed; it is not registered until it is fixed");
+      continue;
+    }
     // Tier BEFORE registerTool — unknown names are BLOCKED and would throw.
     registerExtensionToolTier(
       tool.name,
@@ -154,6 +216,7 @@ function registerExtension(ext: CoreExtension, source: string): void {
         description: tool.description,
         requiresPerCallApproval: tool.requiresPerCallApproval ?? false,
         requiresSandbox: tool.requiresSandbox ?? false,
+        ...(tool.approval ? { approval: tool.approval } : {}),
       },
       ext.name,
     );
@@ -162,6 +225,10 @@ function registerExtension(ext: CoreExtension, source: string): void {
       description: tool.description,
       parameters: tool.parameters,
       execute: tool.execute,
+      // Checked before the approval prompt, as for a built-in; dropped here, a tool could refuse
+      // only from execute, after the person had approved the call.
+      ...(tool.refuse ? { refuse: tool.refuse } : {}),
+      ...(tool.effect ? { effect: tool.effect } : {}),
       group: tool.group ?? ext.name,
       ...(tool.embeddingDescription ? { embeddingDescription: tool.embeddingDescription } : {}),
       ...(tool.costHint ? { costHint: tool.costHint } : {}),
@@ -172,6 +239,16 @@ function registerExtension(ext: CoreExtension, source: string): void {
     toolNames.push(tool.name);
   }
 
+  // After the tools, the last step that can throw: an extension that fails to load is skipped, and
+  // its veto must not stay behind to refuse every call. One that is not a function cannot say which
+  // calls it lets through, so it refuses every call instead of failing the load (module comment).
+  if (typeof ext.authorizeToolCall === "function") {
+    registerToolCallAuthorizer(ext.name, ext.authorizeToolCall);
+  } else if (ext.authorizeToolCall !== undefined) {
+    log.error({ extension: ext.name }, "extension authorizeToolCall is not a function; it refuses every tool call until it is fixed");
+    registerToolCallAuthorizer(ext.name, ({ name }) => `Tool '${name}' was refused: the ${ext.name} extension's authorizeToolCall is not a function.`);
+  }
+
   const ctx: ActiveExtension["ctx"] = {
     name: ext.name,
     log: childLogger(`ext:${ext.name}`),
@@ -179,6 +256,13 @@ function registerExtension(ext: CoreExtension, source: string): void {
   };
   _active.push({ ext, ctx, booted: false });
 
+  // An authorizeAgentRun that is not a function refuses every agent run instead of failing the load
+  // (module comment): called, it would throw on every run, and a hook that throws refuses the run.
+  let recorded = ext;
+  if (typeof ext.authorizeAgentRun !== "function" && ext.authorizeAgentRun !== undefined) {
+    log.error({ extension: ext.name }, "extension authorizeAgentRun is not a function; it refuses every agent run until it is fixed");
+    recorded = { ...ext, authorizeAgentRun: ({ agentName }) => `Agent ${agentName} cannot run: the ${ext.name} extension's authorizeAgentRun is not a function` };
+  }
   _recordLoadedExtension(
     {
       name: ext.name,
@@ -190,8 +274,18 @@ function registerExtension(ext: CoreExtension, source: string): void {
       loadedAt: new Date().toISOString(),
       source,
     },
-    ext,
+    recorded,
   );
+
+  // Last, once nothing above can throw any more: a `roles` policy replaces a method's default
+  // minimum role, so one left behind by an extension that failed to load (a tool that shadows a
+  // built-in, a second authProvider) opened methods to roles nobody vetted. A route policy only
+  // adds a gate, so one left behind only restricts. A malformed RPC policy does not fail the load,
+  // as for route policies: it is logged, and refuses its method, or every method, to every caller
+  // (rpc-policy.ts registerManifestRpcPolicies).
+  for (const problem of registerManifestRpcPolicies(ext.name, ext.rpcPolicies)) {
+    log.error({ extension: ext.name, problem }, "extension rpc policy is malformed");
+  }
 }
 
 /**
@@ -217,7 +311,48 @@ export async function loadCoreExtensions(): Promise<{ loaded: number; failed: nu
       logAudit("extension_load_failed", { extension: name, source: entry, error: String(err) }, { severity: "error" });
     }
   }
+  // Once every extension's roles are known: a policy naming a role nobody can hold refuses nobody by
+  // it (a deny list) or admits nobody by it (a roles list). A typo, or the role of an extension that
+  // did not load.
+  for (const { source, method, pattern, unknownRoles } of routePolicyUnknownRoles(listExtensionRoles().map((role) => role.name))) {
+    log.error({ extension: source, ...(method ? { method } : {}), pattern, unknownRoles }, "route policy names a role no one holds");
+  }
   return { loaded, failed, dir };
+}
+
+/**
+ * Declares the core extensions' roles and registers nothing else of them: no tools, hooks,
+ * policies, credential store, routes or boot. For a process that runs work for accounts without
+ * loading the extensions: the standalone scene worker (scene-worker-main.ts) runs each queued job
+ * with its owner's role as the auth layer holds it, and under multi-user auth a role that nobody
+ * declares signs nobody in (gateway/auth.ts declaredRole). Without the roles, every job and
+ * scheduled run of an account holding an extension's role failed there as one of an account that no
+ * longer signs in.
+ *
+ * An extension declares its roles here only when loadCoreExtensions would get as far as declaring
+ * them: its module imports, its manifest is valid, and no tool it would register shadows a built-in.
+ * Otherwise it is logged and its roles stay undeclared, as in a gateway where it failed to load.
+ */
+export async function registerCoreExtensionRoles(): Promise<{ registered: number; failed: number; dir: string }> {
+  const dir = resolveExtensionsDir();
+  let registered = 0;
+  let failed = 0;
+  for (const { name, entry } of discoverEntryFiles(dir)) {
+    if (_active.some((a) => a.ext.name === name)) continue;
+    try {
+      const mod = await _importer(entry);
+      validateManifest(name, mod.default);
+      // registerExtension skips a malformed tool, then throws on one that shadows a built-in.
+      const shadowing = (mod.default.tools ?? []).find((tool) => toolProblem(tool) === null && isBuiltinTool(tool.name));
+      if (shadowing) throw new Error(`extension "${name}" must not shadow built-in tool "${shadowing.name}"`);
+      _recordExtensionRoles(mod.default.roles ?? []);
+      registered++;
+    } catch (err) {
+      failed++;
+      log.error({ extension: name, entry, err }, "core extension failed to load — its roles are not declared in this process");
+    }
+  }
+  return { registered, failed, dir };
 }
 
 /**

@@ -11,6 +11,9 @@
  * than by field name, so screenshots, uploads and whatever produces bytes next are covered
  * without anyone remembering to add them to a list.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { sanitizeAuditData } from "../audit/logger.js";
@@ -88,27 +91,33 @@ describe("audit inline payloads", () => {
     // multi-megabyte file: it renders rawHistory and message metadata, which carry the same
     // dataUrl. Same guard, one implementation — a second copy would drift.
     const { buildSessionDebugMarkdownFromSnapshot } = await import("../agent/debug-session-export.js");
-    const rendered = await buildSessionDebugMarkdownFromSnapshot({
-      sessionId: "s1",
-      channel: "webchat",
-      createdAt: "2026-09-22T07:16:34.505Z",
-      updatedAt: "2026-09-22T07:19:34.620Z",
-      status: "Active",
-      turnCount: 2,
-      workspacePath: "/workspace",
-      systemPrompt: "",
-      transcript: [],
-      rawHistory: [{
-        role: "tool",
-        content: "Image generated successfully.",
-        metadata: { outputPath: "generated/sunset.png", dataUrl: bigDataUrl },
-      }],
-      auditEvents: [],
-      subSessionIds: [],
-    } as never);
+    // Its own workspace: the export reads the session's audit events from the workspace's state dir.
+    const workspacePath = mkdtempSync(join(tmpdir(), "sai-audit-inline-export-"));
+    try {
+      const rendered = await buildSessionDebugMarkdownFromSnapshot({
+        sessionId: "s1",
+        channel: "webchat",
+        createdAt: "2026-09-22T07:16:34.505Z",
+        updatedAt: "2026-09-22T07:19:34.620Z",
+        status: "Active",
+        turnCount: 2,
+        workspacePath,
+        systemPrompt: "",
+        transcript: [],
+        rawHistory: [{
+          role: "tool",
+          content: "Image generated successfully.",
+          metadata: { outputPath: "generated/sunset.png", dataUrl: bigDataUrl },
+        }],
+        auditEvents: [],
+        subSessionIds: [],
+      } as never);
 
-    expect(rendered).not.toContain("AAAAAAAAAA");
-    expect(rendered).toContain("omitted");
-    expect(rendered).toContain("generated/sunset.png");
+      expect(rendered).not.toContain("AAAAAAAAAA");
+      expect(rendered).toContain("omitted");
+      expect(rendered).toContain("generated/sunset.png");
+    } finally {
+      rmSync(workspacePath, { recursive: true, force: true });
+    }
   });
 });

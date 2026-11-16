@@ -125,6 +125,7 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
+import { agentsRefusedToCaller } from "../agent/full-scope-agent-floor.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { announceAgentCapability } from "../swarm/capabilities.js";
 import { clearTaskBids, collectTaskBids, DEFAULT_AUTONOMOUS_BID_WINDOW_MS, isAutonomousBiddingStarted } from "../swarm/bidding.js";
@@ -2718,6 +2719,8 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
         identity: ctx.identity,
+        // The caller's role travels with its identity; unset, the run takes the context's.
+        ...(ctx.userRole ? { userRole: ctx.userRole } : {}),
         allowedAgents: ctx.allowedAgents,
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,
@@ -3011,11 +3014,14 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
         // answer despite 31 min of real research. Skip pure failure stubs,
         // planning-only narration, and infrastructure failures. A run that never started for want of
         // a usable tool ("missing_tools") is the runner's own refusal, not evidence: kept here, it came
-        // back to the caller as a successful partial.
+        // back to the caller as a successful partial. So is a run refused before it started
+        // ("refused": the role floor or an extension's authorizeAgentRun hook, whose reason can run
+        // past 200 characters).
         if (
           !lastFailureWasInfrastructure
           && !sawOnlyBlankTab
           && stats?.terminalState !== "missing_tools"
+          && stats?.terminalState !== "refused"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)
           && !looksLikeOnlyFailureStubs(output)
@@ -3956,10 +3962,15 @@ registerTool({
 
     // Route through the same semantic+keyword engine as search_agents but
     // return up to 10 candidates and use "low" as minimum confidence so
-    // browse-mode callers see the full competitive set.
+    // browse-mode callers see the full competitive set. An agent a run would refuse this caller
+    // (the role floor for full-scope agents, an extension hook) is not offered to plan with.
+    const excludeAgents = [
+      ...(ctx.currentAgentName ? [ctx.currentAgentName] : []),
+      ...await agentsRefusedToCaller({ role: ctx.userRole, identity: ctx.identity }),
+    ];
     const resolution = await resolveAgentRouting(raw, {
       minConfidence: "low",
-      excludeAgents: ctx.currentAgentName ? [ctx.currentAgentName] : undefined,
+      excludeAgents: excludeAgents.length > 0 ? excludeAgents : undefined,
       allowedAgents: ctx.allowedAgents,
       allowKeywordFallback: false,
     });
@@ -4114,12 +4125,17 @@ registerTool({
     const currentAgentName = typeof ctx.currentAgentName === "string" && ctx.currentAgentName.trim().length > 0
       ? ctx.currentAgentName.trim()
       : undefined;
-    // Route WITHOUT excludeAgents so the invoking agent can still appear in
+    // An agent a run would refuse this caller (the role floor for full-scope agents, an extension
+    // hook) is left out of every search below, so the orchestrator does not plan with it.
+    const refusedAgents = await agentsRefusedToCaller({ role: ctx.userRole, identity: ctx.identity });
+    const refusedExclusion = refusedAgents.length > 0 ? { excludeAgents: refusedAgents } : {};
+    // Route WITHOUT excluding the invoking agent so it can still appear in
     // rawResolution — we need that to detect self-exclusion.  The manual
     // filter below removes it before the result is returned to the caller.
     const rawResolution = await resolveAgentRouting(raw, {
       minConfidence,
       allowedAgents: ctx.allowedAgents,
+      ...refusedExclusion,
       allowKeywordFallback: false,
     });
     const selfExcluded = currentAgentName
@@ -4192,6 +4208,7 @@ registerTool({
         const retryResolutionRaw = await resolveAgentRouting(shortened, {
           minConfidence,
           allowedAgents: ctx.allowedAgents,
+          ...refusedExclusion,
           allowKeywordFallback: false,
         });
         const retryResolution = currentAgentName
@@ -4259,6 +4276,7 @@ registerTool({
           resolve: (query) => resolveAgentRouting(query, {
             minConfidence,
             allowedAgents: ctx.allowedAgents,
+            ...refusedExclusion,
             allowKeywordFallback: false,
           }),
           // Self-exclusion applies to the restatement too: a coordinator that routed to

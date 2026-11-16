@@ -201,6 +201,7 @@ async function searchAgents(
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-format-producer-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: AGENTS,
     // The live reranker answered HTTP 500 on that run, so the embedding order stood.
@@ -243,7 +244,7 @@ async function searchAgents(
 
   const tool = getTool("search_agents");
   if (!tool) throw new Error("search_agents tool is not registered");
-  const result = await tool.execute({ query }, { sessionId: session.id, workspacePath: "/workspace" });
+  const result = await tool.execute({ query }, { sessionId: session.id, workspacePath: tempDir });
   const auditRow = logAudit.mock.calls.find((call) => call[0] === "agent_routing_evaluated")?.[1] as Record<string, unknown> | undefined;
   return { output: result.output, metadata: (result.metadata ?? {}) as Record<string, unknown>, auditRow };
 }

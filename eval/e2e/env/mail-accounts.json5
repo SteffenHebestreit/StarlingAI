@@ -19,5 +19,5 @@
     },
   ],
   // The eval identities see only accounts bound to them: never the operator's shared accounts.
-  isolatedUsers: ["eval", "eval-viewer"],
+  isolatedUsers: ["eval", "eval-viewer", "eval-peer"],
 }

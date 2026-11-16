@@ -15,6 +15,29 @@ vi.mock("../audit/logger.js", () => ({
   logAudit: vi.fn(),
 }));
 
+// The extension loader's error lines, recorded.
+const loaderErrors = vi.hoisted(() => [] as Array<{ fields: Record<string, unknown>; message: string }>);
+vi.mock("../logger.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../logger.js")>();
+  return {
+    ...original,
+    childLogger: (name: string, meta?: Record<string, unknown>) => {
+      const logger = original.childLogger(name, meta);
+      if (name !== "extension-loader") return logger;
+      return new Proxy(logger, {
+        get(target, property, receiver) {
+          if (property === "error") {
+            return (fields: unknown, message?: unknown) => {
+              loaderErrors.push({ fields: (fields ?? {}) as Record<string, unknown>, message: String(message ?? "") });
+            };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    },
+  };
+});
+
 import {
   _resetExtensionsForTests,
   getExtensionGuardrailHooks,
@@ -41,6 +64,7 @@ import {
 import { checkInput } from "../guardrails/input.js";
 import { scanOutput } from "../guardrails/output.js";
 import { _resetToolGroupsForTests } from "../tools/groups.js";
+import { _resetRoutePoliciesForTests, findRoutePolicy } from "../gateway/route-policies.js";
 
 // Point the loader at src/extensions and lift the `_` skip by loading the
 // shipped reference extension through a directory that includes it.
@@ -96,6 +120,8 @@ function resetAll(): void {
   _resetExtensionLoaderForTests();
   _resetExtensionToolTiersForTests();
   _resetToolGroupsForTests();
+  _resetRoutePoliciesForTests();
+  loaderErrors.length = 0;
   mockExtensionsConfig = {};
   delete process.env["SAI_EXTENSIONS_DIR"];
   setExtensionImporterForTests(null);
@@ -256,6 +282,112 @@ describe("extension loader via SAI_EXTENSIONS_DIR", () => {
       expect(result.failed).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("extension route policies", () => {
+  it("registers deny-roles policies from a manifest", async () => {
+    const { dir, cleanup } = await writeFixture();
+    try {
+      setExtensionImporterForTests(async () => ({
+        default: { ...fixtureManifest(), routePolicies: [{ pattern: "/ws", denyRoles: ["example-auditor"] }] },
+      }));
+      process.env["SAI_EXTENSIONS_DIR"] = dir;
+      expect(await loadCoreExtensions()).toMatchObject({ loaded: 1, failed: 0 });
+      expect(findRoutePolicy("GET", "/ws")).toMatchObject({ source: "example", denyRoles: ["example-auditor"] });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("loads a manifest with a malformed policy: its roles, tools and other policies stay, and the policy refuses everyone", async () => {
+    // Failing the load dropped the extension's roles, and a role no extension declares signs in as
+    // operator: a fork's lowest role was raised by a typo in one policy.
+    const { dir, cleanup } = await writeFixture();
+    try {
+      setExtensionImporterForTests(async () => ({
+        default: {
+          ...fixtureManifest(),
+          routePolicies: [
+            { pattern: "/api/example/*", denyRole: ["example-auditor"] },
+            { pattern: "/ws", roles: ["admin"], denyRoles: ["viewer"] },
+            { method: "POST", pattern: "/mcp", roles: "admin" },
+            { path: "/api/other", roles: ["admin"] },
+            { pattern: "/a2a/*", denyRoles: ["example-auditor"] },
+          ],
+        },
+      }));
+      process.env["SAI_EXTENSIONS_DIR"] = dir;
+      expect(await loadCoreExtensions()).toMatchObject({ loaded: 1, failed: 0 });
+      expect(listExtensionRoles().map((role) => role.name)).toContain("example-auditor");
+      expect(getTool("example_echo")).toBeDefined();
+      // Each malformed entry with a path closes that path to every caller until it is fixed.
+      expect(findRoutePolicy("GET", "/api/example/ping")).toMatchObject({ source: "example", roles: [] });
+      expect(findRoutePolicy("GET", "/ws")).toMatchObject({ source: "example", roles: [] });
+      expect(findRoutePolicy("POST", "/mcp")).toMatchObject({ source: "example", method: "POST", roles: [] });
+      expect(findRoutePolicy("GET", "/mcp")).toBeNull();
+      // One without a path has nothing to close; the well-formed one registers as declared.
+      expect(findRoutePolicy("GET", "/api/other")).toBeNull();
+      expect(findRoutePolicy("POST", "/a2a/v1")).toMatchObject({ source: "example", denyRoles: ["example-auditor"] });
+      const malformed = loaderErrors.filter((entry) => entry.message === "extension route policy is malformed");
+      expect(malformed.map((entry) => entry.fields["problem"])).toEqual([
+        expect.stringMatching(/"\/api\/example\/\*".*exactly one of "roles" or "denyRoles".*refuses every caller/),
+        expect.stringMatching(/"\/ws".*exactly one of "roles" or "denyRoles".*refuses every caller/),
+        expect.stringMatching(/"\/mcp".*"roles" must be a list of role names.*refuses every caller/),
+        expect.stringMatching(/pattern must start with "\/".*not registered/),
+      ]);
+      expect(malformed.every((entry) => entry.fields["extension"] === "example")).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("loads a manifest whose routePolicies is not a list, registering none of it", async () => {
+    const { dir, cleanup } = await writeFixture();
+    try {
+      setExtensionImporterForTests(async () => ({
+        default: { ...fixtureManifest(), routePolicies: { pattern: "/ws", denyRoles: ["viewer"] } },
+      }));
+      process.env["SAI_EXTENSIONS_DIR"] = dir;
+      expect(await loadCoreExtensions()).toMatchObject({ loaded: 1, failed: 0 });
+      expect(getTool("example_echo")).toBeDefined();
+      expect(listExtensionRoles().map((role) => role.name)).toContain("example-auditor");
+      expect(findRoutePolicy("GET", "/ws")).toBeNull();
+      expect(loaderErrors).toEqual([
+        expect.objectContaining({ message: "extension route policy is malformed", fields: expect.objectContaining({ problem: expect.stringMatching(/must be a list/) }) }),
+      ]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("logs a policy naming a role that no extension declares and no built-in is", async () => {
+    // No caller ever holds such a role (an unknown one signs in as operator), so a deny entry naming
+    // it refuses nobody: a typo there failed open without a word.
+    const { dir, cleanup } = await writeFixture();
+    try {
+      setExtensionImporterForTests(async () => ({
+        default: {
+          ...fixtureManifest(),
+          routePolicies: [
+            { pattern: "/ws", denyRoles: ["example-auditr"] },
+            { pattern: "/mcp", roles: ["operator", "example-auditor", "Admin"] },
+            { pattern: "/a2a/*", denyRoles: ["example-auditor", "viewer"] },
+          ],
+        },
+      }));
+      process.env["SAI_EXTENSIONS_DIR"] = dir;
+      expect(await loadCoreExtensions()).toMatchObject({ loaded: 1, failed: 0 });
+      const unknown = loaderErrors.filter((entry) => entry.message === "route policy names a role no one holds");
+      expect(unknown.map((entry) => entry.fields)).toEqual([
+        expect.objectContaining({ extension: "example", pattern: "/ws", unknownRoles: ["example-auditr"] }),
+        expect.objectContaining({ extension: "example", pattern: "/mcp", unknownRoles: ["Admin"] }),
+      ]);
+      // Logged, not refused: the policies stay as declared.
+      expect(findRoutePolicy("GET", "/ws")).toMatchObject({ denyRoles: ["example-auditr"] });
+    } finally {
+      cleanup();
     }
   });
 });

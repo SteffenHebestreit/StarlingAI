@@ -182,7 +182,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
@@ -286,7 +286,7 @@ const pausedCheckpoints = computed(() =>
 );
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 function authHeaders(): Record<string, string> {

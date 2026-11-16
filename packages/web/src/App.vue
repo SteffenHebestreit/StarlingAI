@@ -1,15 +1,19 @@
 <template>
   <div class="app-shell overflow-hidden text-gray-100 flex flex-col">
 
+    <!-- A route with meta.layout "bare" (layout/routeLayout.ts) has the viewport to itself: none of
+         the shell is drawn for it — orbs, banner, header, sign-in dialog, toasts, palette, theme
+         dialog, dock — only <main> with the page, which then fills the whole shell. -->
+
     <!-- Background orbs -->
-    <div class="bg-orb bg-orb-1" aria-hidden="true" />
-    <div class="bg-orb bg-orb-2" aria-hidden="true" />
+    <div v-if="!bareLayout" class="bg-orb bg-orb-1" aria-hidden="true" />
+    <div v-if="!bareLayout" class="bg-orb bg-orb-2" aria-hidden="true" />
 
     <!-- Model-unreachable banner: the gateway can't reach the configured model
          endpoint (e.g. a local LM Studio / Ollama that isn't running yet), so turns
          would fail with an unexplained empty answer. Auto-clears once it's up. -->
     <div
-      v-if="gateway.modelUnreachable"
+      v-if="!bareLayout && gateway.modelUnreachable"
       role="alert"
       class="relative z-20 shrink-0 border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-center text-sm text-amber-100 backdrop-blur-lg"
     >
@@ -18,8 +22,22 @@
       <code class="font-mono">.env</code>; this clears automatically once it responds.
     </div>
 
+    <!-- Access-denied banner: the gateway accepted the sign-in, but a route policy keeps this
+         account's role off the live dashboard socket (close code 4403). The token is kept, so
+         pages that work over REST still do; the socket is not retried. -->
+    <div
+      v-if="!bareLayout && gateway.accessDenied"
+      role="alert"
+      class="relative z-20 shrink-0 border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-center text-sm text-amber-100 backdrop-blur-lg"
+    >
+      This account has no access to the live dashboard.
+      <button type="button" class="ml-2 underline underline-offset-2 hover:text-white" @click="openAccountLogin">
+        Sign in with another account
+      </button>
+    </div>
+
     <!-- Header -->
-    <header ref="headerRef" class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
+    <header v-if="!bareLayout" ref="headerRef" class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
@@ -346,16 +364,19 @@
     </header>
 
     <!-- Login modal: auto-shown when disconnected/auth-failed, or opened on
-         demand (e.g. token mode → sign in as a created user / switch account). -->
+         demand (e.g. token mode → sign in as a created user / switch account).
+         When it shows and whether it closes: composables/loginModal.ts.
+         A bare page signs in its own way, if at all. -->
     <LoginModal
-      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting && !gateway.reconnecting)"
-      :dismissible="gateway.connected"
+      v-if="!bareLayout && loginModal.visible"
+      :dismissible="loginModal.dismissible"
       :sso-error="ssoError"
       @close="showLogin = false"
     />
 
     <!-- Under the header, wherever it ends (toastStackStyle); the class's top is for the moment before it is measured. -->
     <TransitionGroup
+      v-if="!bareLayout"
       name="toast"
       tag="div"
       class="pointer-events-none fixed right-4 top-[4.5rem] z-toast flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
@@ -387,10 +408,19 @@
             <p class="mt-2 text-sm leading-5 text-gray-300">{{ item.message }}</p>
             <div class="mt-3 flex items-center justify-between gap-3 text-[11px] text-gray-500">
               <span>{{ formatNotificationTime(item.createdAt) }}</span>
+              <!-- A toast that brings its own button (the update notice's Reload). -->
+              <button
+                v-if="item.action"
+                type="button"
+                class="rounded-full border border-white/10 px-2.5 py-1 text-gray-300 transition hover:border-white/20 hover:text-white"
+                @click="runNotificationAction(item)"
+              >
+                {{ item.action.label }}
+              </button>
               <!-- A scheduled task's post names its conversation: Open goes to that one, not to
                    whichever is on the chat page. -->
               <button
-                v-if="item.targetPath && item.category === 'follow_up' && item.sessionId"
+                v-else-if="item.targetPath && item.category === 'follow_up' && item.sessionId"
                 type="button"
                 class="rounded-full border border-white/10 px-2.5 py-1 text-gray-300 transition hover:border-white/20 hover:text-white"
                 @click="openFollowUp(item)"
@@ -417,10 +447,13 @@
       <RouterView />
     </main>
 
-    <!-- The one "are you sure?" dialog, for any page that asks (composables/useConfirm.ts). -->
+    <!-- The one "are you sure?" dialog, for any page that asks (composables/useConfirm.ts). Kept on
+         a bare page too: it shows only when the page itself asks, and without it a confirmAction()
+         there would never be answered. -->
     <ConfirmHost />
 
     <CommandPalette
+      v-if="!bareLayout"
       :open="paletteOpen"
       :commands="paletteCommands"
       :current-path="$route.path"
@@ -431,7 +464,7 @@
     <!-- Theme: the appearance picker in a dialog, opened from the account menu. -->
     <Teleport to="body">
       <div
-        v-if="themeOpen"
+        v-if="!bareLayout && themeOpen"
         class="fixed inset-0 z-modal flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
         @click.self="closeTheme"
       >
@@ -460,14 +493,19 @@
 
     <!-- Claude subscription connect / manage (browser OAuth verification). -->
     <ModelConnectModal
-      v-if="showModelConnect"
+      v-if="!bareLayout && showModelConnect"
       @close="showModelConnect = false"
       @connected="onClaudeConnected"
     />
 
     <!-- Global operator requests: approvals + live-browser handoff, reachable
          from any page (e.g. for scenes/jobs started from the dropdown). -->
-    <OperatorRequestsDock v-if="gateway.connected" />
+    <OperatorRequestsDock v-if="!bareLayout && gateway.connected" />
+    <!-- Extensions' app-wide components (extensions/registry.ts shellComponents): watchers, toast or
+         banner regions, each behind an error boundary. Part of the shell, so they take every guard
+         the dock above takes except its connection one (ExtensionShellHost.test.ts checks this);
+         mounted afresh whenever the signed-in user changes. -->
+    <ExtensionShellHost v-if="!bareLayout" :components="extensionShell" :session="currentUser?.username ?? ''" />
   </div>
 </template>
 
@@ -477,11 +515,13 @@ import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { useProductStore } from "@/stores/product";
-import { extensionNavEntries } from "@/extensions/registry";
+import { extensionNavEntries, extensionShellComponents } from "@/extensions/registry";
+import ExtensionShellHost from "@/extensions/ExtensionShellHost";
 import { useModelPresetStore } from "@/stores/modelPreset";
-import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
+import { useNotificationStore, type BrowserNotificationItem, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 import { readSsoReturn } from "@/composables/ssoReturn";
+import { loginModalState } from "@/composables/loginModal";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
 import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
@@ -491,6 +531,7 @@ import { useFocusTrap } from "@/composables/useFocusTrap";
 import ConfirmHost from "@/components/ConfirmHost.vue";
 import CommandPalette from "@/components/CommandPalette.vue";
 import { isPaletteShortcut, type PaletteCommand } from "@/composables/commandPalette";
+import { routeIsBare } from "@/layout/routeLayout";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
@@ -501,6 +542,10 @@ const notifications = useNotificationStore();
 const modelPreset = useModelPresetStore();
 const $route = useRoute();
 const router = useRouter();
+// The page on screen asked for no shell (route meta.layout "bare"): the template draws only the
+// page, and the shell's keyboard shortcut stays out of its way. Right from a cold load's first
+// frame, before the page itself has arrived (routeIsBare says how).
+const bareLayout = computed(() => routeIsBare(router));
 
 // Header model switch (Local ⇄ Claude). The gateway persists the choice in the
 // runtime overlay, so it survives restarts and applies to the whole swarm.
@@ -532,6 +577,14 @@ const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+const loginModal = computed(() => loginModalState({
+  requested: showLogin.value,
+  authFailed: gateway.authFailed,
+  connected: gateway.connected,
+  connecting: gateway.connecting,
+  reconnecting: gateway.reconnecting,
+  accessDenied: gateway.accessDenied,
+}));
 // Why the last SSO sign-in ended without a token: the gateway's code, which the login modal shows
 // a message for. Cleared once a sign-in connects.
 const ssoError = ref<string | null>(null);
@@ -556,13 +609,17 @@ function measureHeader(): number {
 // The toasts keep the gap they had under a one-row header at the top of the page.
 const toastStackStyle = computed(() => (headerBottom.value > 0 ? { top: `${Math.round(headerBottom.value) + 12}px` } : undefined));
 // A wrap changes the header's height without the window changing size (a longer status, a crumb).
+// Follows the header element rather than looking once on mount: a bare page has no header, so
+// after one the header comes (back) only when the user moves on to a page with the shell.
 let headerObserver: ResizeObserver | null = null;
-onMounted(() => {
+watch(headerRef, (header) => {
+  headerObserver?.disconnect();
+  headerObserver = null;
   measureHeader();
-  if (typeof ResizeObserver === "undefined" || !headerRef.value) return;
+  if (typeof ResizeObserver === "undefined" || !header) return;
   headerObserver = new ResizeObserver(() => { measureHeader(); });
-  headerObserver.observe(headerRef.value);
-});
+  headerObserver.observe(header);
+}, { flush: "post" });
 onUnmounted(() => headerObserver?.disconnect());
 // The panel hangs under the burger, wherever the header has put it. Its top used to be a fixed
 // 4.4rem, so it lay over the header whenever the banner showed or the header had wrapped.
@@ -767,6 +824,10 @@ const extensionNav = computed<NavLeaf[]>(() => {
     .map<NavLeaf>((entry) => ({ kind: "leaf", to: entry.path, label: entry.label }));
 });
 
+// Extension-contributed app-wide components, found the same way. The list is fixed at build time,
+// so it is read once; the template mounts them through ExtensionShellHost.
+const extensionShell = extensionShellComponents();
+
 const navEntries = computed<NavEntry[]>(() => {
   const core: NavEntry[] = !auth.isViewer
     ? allNavEntries
@@ -829,7 +890,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     else for (const item of entry.items) pages.push({ id: `go:${item.to}`, label: item.label, group: entry.label, hint: item.hint, to: item.to });
   }
   const actions: PaletteCommand[] = [];
-  if (gateway.connected) {
+  // Only for a connection that may open a session (hello-ok lists what it may call): not a viewer.
+  if (gateway.connected && gateway.mayCall("session.create")) {
     actions.push({
       id: "do:new-session", label: "New session", group: "Action", hint: "Start a fresh conversation in the chat", keywords: "chat conversation clear",
       run: () => { void router.push("/").then(() => gateway.createSession()); },
@@ -853,6 +915,8 @@ function runPaletteCommand(command: PaletteCommand): void {
 }
 function onPaletteShortcut(event: KeyboardEvent): void {
   if (!isPaletteShortcut(event)) return;
+  // Not on a bare page: it has no shell to search, and the key is left to the page.
+  if (bareLayout.value) return;
   // Not over the sign-in screen: there is nowhere to go yet.
   if (!gateway.connected && !gateway.reconnecting) return;
   event.preventDefault();
@@ -863,6 +927,19 @@ function onPaletteShortcut(event: KeyboardEvent): void {
 }
 onMounted(() => window.addEventListener("keydown", onPaletteShortcut));
 onUnmounted(() => window.removeEventListener("keydown", onPaletteShortcut));
+
+// Moving on to a bare page closes whatever the shell had open. Nothing of it is drawn there, but an
+// open menu or dialog would still answer Escape (useEscapeToClose) over the page, and would be back
+// on the way out.
+watch(bareLayout, (bare) => {
+  if (!bare) return;
+  navOpen.value = false;
+  accountMenuOpen.value = false;
+  paletteOpen.value = false;
+  themeOpen.value = false;
+  showModelConnect.value = false;
+  showLogin.value = false;
+});
 
 const connectionLabel = computed(() => {
   if (gateway.connected) return "Connected";
@@ -894,6 +971,12 @@ function notificationDotClass(level: NotificationLevel): string {
     default:
       return "bg-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.55)]";
   }
+}
+
+/** A toast's own button: the toast goes, and its action runs. */
+function runNotificationAction(item: BrowserNotificationItem): void {
+  notifications.dismiss(item.id);
+  item.action?.run();
 }
 
 /** Open the conversation a scheduled task posted into. One that is gone opens in the session list,

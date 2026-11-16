@@ -32,7 +32,7 @@ describe("debug session markdown export", () => {
 
     const session = createSession({
       channel: "webchat",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       systemPrompt: "You are a debug export test assistant.",
     });
 
@@ -119,7 +119,7 @@ describe("debug session markdown export", () => {
 
     const session = createSession({
       channel: "webchat",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       systemPrompt: "You are an audit export test assistant.",
     });
 
@@ -158,7 +158,7 @@ describe("debug session markdown export", () => {
 
     const session = createSession({
       channel: "webchat",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       systemPrompt: "You are a busy export test assistant.",
     });
 
@@ -177,7 +177,7 @@ describe("debug session markdown export", () => {
 
     const session = createSession({
       channel: "webchat",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
       systemPrompt: "You are a detached export test assistant.",
     });
 

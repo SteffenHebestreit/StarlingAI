@@ -3,7 +3,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { z } from "zod";
@@ -23,7 +23,8 @@ import { registerMissionRoutes } from "./mission-routes.js";
 import { registerLongRunningRoutes } from "./long-running-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
-import { registerChannelRoutes } from "./channels-routes.js";
+import { discardUnreadBody } from "./unread-body.js";
+import { deadLetterAccess, registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
 import { registerAuthRoutes } from "./auth-routes.js";
@@ -35,7 +36,6 @@ import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection, steerChatTurn } from "./rpc.js";
-import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -49,19 +49,22 @@ import {
   saveJobDefinition,
   deleteJobDefinition,
   resolveJobSteps,
-  getApiWebhookKeys,
 } from "../credentials/jobs.js";
+import { webhookKeyAdmits } from "./webhook-keys.js";
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent, type SubAgentRunOptions } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
 import { canSeeSceneJob, presentSceneJob, sceneJobViewer } from "./scene-job-access.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
+import { autoApprovingCallback } from "../tools/registry.js";
+import { approvalConfirmationPage, approvalNoDecisionPage, approvalResultPage, readApprovalCallbackBody } from "./approval-pages.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
 import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./speech-summary.js";
 import { warmTextLanguageDetector } from "../agent/text-language.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
+import { decideRoutedApproval } from "../approval/routed.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, imageRequestBoundsError, requestImageGeneration } from "../multimodal/image-generation.js";
@@ -71,6 +74,7 @@ import { HubVoiceError, cancelTraining, cloneHubVoice, deleteHubVoice, designHub
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { checkInput } from "../guardrails/input.js";
+import { jobTaskParams, screenWorkflowParams, templateParamNames, workflowParamRefusalMessage } from "../guardrails/workflow-params.js";
 import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
@@ -86,7 +90,7 @@ import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
 import { ModelConfigSchema, RetrievalRerankerSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS, type Config } from "../config/schema.js";
 import { mergeOrchestrationConfigUpdate } from "./orchestration-config-merge.js";
-import { callerMayUseSession } from "./session-route-access.js";
+import { callerMayUseSession, visibleSessionsFor } from "./session-route-access.js";
 import { checkMultimodalConfigSave, mergeMultimodalConfigUpdate } from "./multimodal-config-merge.js";
 import {
   agentModelSecretDestinations,
@@ -140,9 +144,15 @@ import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { mountExtensionRoutes } from "../extension/loader.js";
-import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
+import { routePolicyChain, routePolicyForbiddenMessage } from "./route-policies.js";
+import { decideRoutePolicyChainForTokens, gateRawHttp, presentedTokens, upgradePolicyRefusal } from "./raw-policy-gate.js";
+import { formatListenAddress, gatewayListenHost } from "./listen-address.js";
+import { autoApproveMinRole, mayAutoApprove } from "./auto-approve-policy.js";
 
 const log = childLogger("gateway");
+
+/** Warn-once guard for the deprecated POST /a2a/agents/:name route. */
+let warnedLegacyA2aRoute = false;
 
 function applyTemplate(template: string, params: Record<string, string>): string {
   return template.replace(/\{\{(\w+)(?:\|([^}]*))?\}\}/g, (match, key: string, defaultVal?: string) => {
@@ -152,9 +162,36 @@ function applyTemplate(template: string, params: Record<string, string>): string
   });
 }
 
-function resolveWebhookSecret(secret: string | undefined): string {
-  if (!secret) return "";
-  return secret.startsWith("$") ? (process.env[secret.slice(1)] ?? "") : secret;
+/**
+ * Whether a presented approval secret equals the pending request's, in constant time. Both sides
+ * are hashed first, so the comparison never depends on their lengths and never throws:
+ * timingSafeEqual on the raw values threw when a presented value had the expected number of
+ * characters but not of bytes (a character outside ASCII), and that 500 came only from a request
+ * that is pending. Webhook keys are matched by their digest as well (webhook-keys.ts).
+ */
+function secretMatches(expected: string, presented: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
+  return timingSafeEqual(digest(expected), digest(presented));
+}
+
+/**
+ * Whether POST /api/approval/:id is left to the route rather than the operator-rank gate: for a
+ * routed approval, whose policy names its approvers by role (a sibling role below operator can be
+ * one), and for an id that names no pending approval, which the route answers as not found without
+ * changing anything (an approver answering a request another approver has just decided). A channel
+ * approval stays behind the gate, as before.
+ */
+function approvalDecidedByRoute(path: string): boolean {
+  const match = /^\/api\/approval\/([^/]+)$/.exec(path);
+  if (!match) return false;
+  let id: string;
+  try {
+    id = decodeURIComponent(match[1]!);
+  } catch {
+    return false;
+  }
+  const pending = getPendingApproval(id);
+  return !pending || pending.kind === "routed";
 }
 
 function originFromUrl(url: string | undefined): string | null {
@@ -174,15 +211,32 @@ export function createGateway() {
   const app = new Hono();
 
   // Route-policy RBAC gate (gateway/route-policies.ts): declarative per-route
-  // role lists, registered by core extensions. Runs before every /api handler;
-  // unpoliced routes fall through to their own auth checks.
+  // role lists, registered by core extensions and core. Runs before every /api
+  // handler; unpoliced routes, and callers the deciding policies pass on, fall
+  // through to the route's own auth checks. The surfaces the Node server answers
+  // before Hono are gated in createServer and the upgrade listener
+  // (raw-policy-gate.ts).
   app.use("/api/*", async (c, next) => {
-    const policy = findRoutePolicy(c.req.method, c.req.path);
-    if (!policy) return next();
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    if (!policyAdmitsRole(policy, user.role)) {
-      return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
+    const chain = routePolicyChain(c.req.method, c.req.path);
+    if (chain.length === 0) return next();
+    // A roles policy reads the Authorization header, as it always has. A deny policy lets a caller
+    // without one through to the route's own auth, and several routes take a ?token= or a cookie
+    // instead, so it checks every session token the request presents.
+    const authorization = c.req.header("Authorization");
+    const headerTokens = presentedTokens({ authorization });
+    const everyToken = chain.some((policy) => policy.denyRoles)
+      ? presentedTokens({ authorization, query: c.req.query("token"), cookie: c.req.header("Cookie") })
+      : headerTokens;
+    const { verdict, policy, caller } = await decideRoutePolicyChainForTokens(chain, (candidate) => (candidate.denyRoles ? everyToken : headerTokens));
+    if (verdict === "unauthorized") return c.json({ error: "Unauthorized" }, 401);
+    if (verdict === "forbidden" && policy && caller) {
+      logAudit("rbac_denied", {
+        surface: "rest",
+        method: c.req.method.toUpperCase(),
+        path: c.req.path,
+        role: caller.role,
+      }, { userId: caller.username, severity: "warn" });
+      return c.json({ error: routePolicyForbiddenMessage(policy, caller.role) }, 403);
     }
     return next();
   });
@@ -952,6 +1006,9 @@ export function createGateway() {
     const user = await authenticatedUser(c.req.header("Authorization"));
     // No user → fall through; the route's own auth check will return 401.
     if (!user) return next();
+    // A routed approval names its approvers by role, not by rank, so the route decides who may
+    // answer it (approval/routed.ts); see approvalDecidedByRoute.
+    if (method === "POST" && approvalDecidedByRoute(c.req.path)) return next();
     if (!userHasRole(user, "operator")) {
       logAudit("rbac_denied", {
         username: user.username,
@@ -1379,10 +1436,18 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) {
       return c.json({ error: "Unauthorized" }, 401);
     }
+    // Under multi-user auth the sessions the caller may see, as the socket's session list: its own
+    // and unowned ones, every one for an admin. Every session's id, channel and turn count went to any
+    // caller that signed in. With auth off, every session, as before.
+    let viewer: Parameters<typeof visibleSessionsFor>[0];
+    if (getConfig().auth?.enabled === true) {
+      const caller = await authenticatedUser(c.req.header("Authorization"));
+      viewer = { identity: callerIdentity(caller), role: caller?.role };
+    }
     return c.json({
       version: "0.1.0",
       uptime: process.uptime(),
-      sessions: getAllSessions().map(s => ({
+      sessions: visibleSessionsFor(viewer).map(s => ({
         id: s.id,
         channel: s.channel,
         createdAt: s.createdAt,
@@ -3341,19 +3406,19 @@ export function createGateway() {
 
   app.post("/api/scenes/:name/run", async (c) => {
     const sceneName = c.req.param("name");
-    const scene = getScene(sceneName);
-    if (!scene) return c.json({ error: `Scene not found: ${sceneName}` }, 404);
 
-    // Auth: Bearer token OR scene webhook key
+    // Auth: Bearer token OR this scene's webhook key, decided before the scene is looked up: a
+    // caller with neither gets the same 401 for a scene that exists and one that does not, in the
+    // same time (webhookKeyAdmits never looks the name up), so the names cannot be listed by
+    // trying them.
     const bearerToken = extractBearerToken(c.req.header("Authorization"));
     const keyParam = c.req.query("key") ?? c.req.header("X-Scene-Key") ?? "";
-    const resolvedKey = resolveWebhookSecret(scene.webhookKey);
 
-    const authed = (bearerToken && await verifyToken(bearerToken)) ||
-      (resolvedKey.length >= 16 && keyParam.length === resolvedKey.length &&
-        timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey)));
+    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookKeyAdmits("scene", sceneName, keyParam);
 
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
+    const scene = getScene(sceneName);
+    if (!scene) return c.json({ error: `Scene not found: ${sceneName}` }, 404);
 
     // Run identity: an authenticated operator's dropdown run executes under THEIR
     // username, so per-user RBAC-scoped resources (site credentials with
@@ -3375,6 +3440,17 @@ export function createGateway() {
       }
     } catch { /* body is optional */ }
 
+    // The caller's values are untrusted, though the scene's task they are templated into is not.
+    const sceneParamScreen = screenWorkflowParams(bodyParams, {
+      source: "rest",
+      workflow: sceneName,
+      taskParams: templateParamNames(scene.task),
+      userId: runIdentity.userId,
+    });
+    if (!sceneParamScreen.ok) {
+      return c.json({ error: workflowParamRefusalMessage(sceneName, sceneParamScreen), param: sceneParamScreen.param }, 400);
+    }
+
     // Merge scene defaults with request params
     const mergedParams: Record<string, string> = {};
     for (const [key, def] of Object.entries(scene.params ?? {})) {
@@ -3390,6 +3466,9 @@ export function createGateway() {
       sceneName,
       definitionType: "scene",
       ...runIdentity,
+      // A signed-in caller's role, which the worker resolves again when the run starts; a
+      // webhook-key run has none and runs with no role, as before.
+      ...(triggeredBy ? { requestedByRole: triggeredBy.role } : {}),
       task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
@@ -3449,17 +3528,15 @@ export function createGateway() {
 
   app.post("/api/jobs/:name/run", async (c) => {
     const jobName = c.req.param("name");
-    const definition = getJobDefinition(jobName);
-    if (!definition) return c.json({ error: `Job not found: ${jobName}` }, 404);
 
+    // As on the scene run route: the caller is checked before the job is looked up, so a caller
+    // with no token and no valid key gets the same 401, in the same time, for every name.
     const bearerToken = extractBearerToken(c.req.header("Authorization"));
     const keyParam = c.req.query("key") ?? c.req.header("X-Job-Key") ?? "";
-    const resolvedWebhookKeys = getApiWebhookKeys(definition).map((key) => resolveWebhookSecret(key));
-    const webhookAuthorized = resolvedWebhookKeys.some((resolvedKey) =>
-      resolvedKey.length >= 16 && keyParam.length === resolvedKey.length && timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey))
-    );
-    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookAuthorized;
+    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookKeyAdmits("job", jobName, keyParam);
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
+    const definition = getJobDefinition(jobName);
+    if (!definition) return c.json({ error: `Job not found: ${jobName}` }, 404);
 
     // Run identity: authenticated operator → their username (per-user RBAC
     // resolves their credentials); webhook key → synthetic job identity.
@@ -3476,6 +3553,17 @@ export function createGateway() {
       }
     } catch { /* body is optional */ }
 
+    // The caller's values are untrusted, though the scene tasks they are templated into are not.
+    const jobParamScreen = screenWorkflowParams(bodyParams, {
+      source: "rest",
+      workflow: jobName,
+      taskParams: jobTaskParams(definition),
+      userId: runIdentity.userId,
+    });
+    if (!jobParamScreen.ok) {
+      return c.json({ error: workflowParamRefusalMessage(jobName, jobParamScreen), param: jobParamScreen.param }, 400);
+    }
+
     let steps;
     try {
       steps = resolveJobSteps(definition, bodyParams);
@@ -3487,6 +3575,8 @@ export function createGateway() {
       sceneName: jobName,
       definitionType: "job",
       ...runIdentity,
+      // As for a scene run: the signed-in caller's role, resolved again when the run starts.
+      ...(triggeredBy ? { requestedByRole: triggeredBy.role } : {}),
       steps,
       turnTimeoutMs,
     });
@@ -3495,74 +3585,147 @@ export function createGateway() {
     return c.json({ ok: true, sceneName: jobName, definitionType: "job", jobId: queued.id, sessionId: queued.sessionId, status: queued.status });
   });
 
+  // ── Routed approvals (approval/routed.ts) ────────────────────────────────
+  // A call of a tool whose approval policy names its approvers waits as a "routed" approval. It has
+  // no secret, and only a signed-in caller the policy admits decides it, so these two take a routed
+  // id ahead of the callback endpoints below, which serve the approval channels; any other id falls
+  // through to them. The link carries no caller: it is answered as an unknown id is.
+  app.get("/api/approval/:approvalId", async (c, next) => {
+    if (getPendingApproval(c.req.param("approvalId"))?.kind !== "routed") return next();
+    return c.html("<html><body><h2>Approval request not found or already resolved.</h2></body></html>", 404);
+  });
+
+  // Decided with an approver's session only, and with a second person required not by the
+  // requester. No secret is accepted, and a caller with no valid session is answered as an unknown
+  // id is. Who decided is recorded with the decision.
+  app.post("/api/approval/:approvalId", async (c, next) => {
+    const id = c.req.param("approvalId");
+    if (getPendingApproval(id)?.kind !== "routed") return next();
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Approval request not found or already resolved" }, 404);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json<Record<string, unknown>>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const approved = Boolean(body["approved"]);
+    const identity = callerIdentity(user);
+    const decision = decideRoutedApproval(id, approved, { ...(identity ? { identity } : {}), role: user.role });
+    if (decision.outcome === "refused") {
+      logAudit("rbac_denied", {
+        username: user.username,
+        role: user.role,
+        method: "POST",
+        path: c.req.path,
+        reason: decision.reason === "requester" ? "distinct_approver_required" : "not_an_approver",
+      }, { userId: user.username, severity: "warn" });
+      return decision.reason === "requester"
+        ? c.json({ error: "A second person must approve this request" }, 403)
+        : c.json({ error: `Requires role: ${decision.approverRoles.join(" | ")}` }, 403);
+    }
+    // Another approver may have decided it while this caller was being resolved.
+    if (decision.outcome === "not_found") return c.json({ error: "Approval request not found or already resolved" }, 404);
+    return c.json({ ok: true, approved });
+  });
+
   // ── Approval callback endpoints ──────────────────────────────────────────
   // GET  /api/approval/:id?approved=true|false&secret=X
-  //        — one-click link handler (Slack / WhatsApp / email).  Returns HTML.
+  //        — the link in a Slack / WhatsApp / email message. Returns an HTML page
+  //          with Approve and Deny buttons; the GET itself changes nothing.
   // POST /api/approval/:id
-  //        — programmatic callback (n8n / outbound_webhook receivers).
+  //        — the page's buttons (form: approved=true|false&secret=X), and
+  //          programmatic callbacks (n8n / outbound_webhook receivers), JSON
+  //          whatever their Content-Type:
   //          Body: { approved: boolean, secret: string }
   //          OR   Authorization: Bearer <secret>  +  body: { approved: boolean }
 
   // Dashboard surface: list every pending approval so an authenticated operator
   // can respond from the UI (not just via the Slack/webhook callback links).
   // Covers detached scene/job runs triggered from the dropdown.
+  // Each caller sees what they may decide: a routed approval (a tool call whose approval policy
+  // names who may grant it) if its policy admits their role and they are not a requester who needs a
+  // second person; a channel approval at operator rank. A viewer sees none.
   app.get("/api/approvals/pending", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(listPendingApprovals());
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+    const identity = callerIdentity(user);
+    return c.json(listPendingApprovals({
+      ...(identity ? { identity } : {}),
+      role: user.role,
+      operatorRank: userHasRole(user, "operator"),
+    }));
   });
 
-  // Constant-time approval-secret comparison, mirroring the webhook-key checks
-  // above. The length pre-check both provides the timing guard and keeps
-  // timingSafeEqual from throwing on unequal-length buffers.
+  // Constant-time approval-secret comparison (secretMatches).
   const approvalSecretMatches = (expected: string, provided: string): boolean =>
-    expected.length > 0 && expected.length === provided.length &&
-    timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
+    expected.length > 0 && secretMatches(expected, provided);
+
+  // The per-approval secret is the only credential a callback link carries, so a wrong or missing
+  // one is answered as an unknown id is: the id alone tells nothing about whether a request is
+  // pending. The log keeps the distinction for the operator debugging a channel's secret.
+  const APPROVAL_NOT_FOUND = "Approval request not found or already resolved";
+  const APPROVAL_NOT_FOUND_PAGE = `<html><body><h2>${APPROVAL_NOT_FOUND}.</h2></body></html>`;
+  const logRefusedApprovalSecret = (approvalId: string) =>
+    log.warn({ approvalId }, "Approval callback refused: the secret does not match the pending request");
 
   app.get("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
     const approved = c.req.query("approved") === "true";
     const secret = c.req.query("secret") ?? "";
 
-    const pending = getPendingApproval(id);
-    if (!pending) {
-      return c.html("<html><body><h2>Approval request not found or already resolved.</h2></body></html>", 404);
-    }
-
     // Verify secret if one was set (slack/outbound_webhook channels always set one)
-    if (pending.secret && !approvalSecretMatches(pending.secret, secret)) {
-      return c.html("<html><body><h2>Invalid approval secret.</h2></body></html>", 403);
+    const pending = getPendingApproval(id);
+    if (!pending || (pending.secret && !approvalSecretMatches(pending.secret, secret))) {
+      if (pending) logRefusedApprovalSecret(id);
+      return c.html(APPROVAL_NOT_FOUND_PAGE, 404);
     }
 
-    resolveApproval(id, approved);
-    const action = approved ? "✅ Approved" : "❌ Denied";
-    const safeName = pending.toolName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-    return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>${action}</h2><p>Tool: <strong>${safeName}</strong></p><p>You can close this tab.</p></body></html>`);
+    // The GET only shows the request. Link previewers, mail scanners and chat unfurlers fetch a
+    // link with nobody behind it, and a GET that resolved the request approved or denied it by
+    // itself. The person decides with a button, which posts the secret back to this path.
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    return c.html(approvalConfirmationPage({
+      approvalId: id,
+      toolName: pending.toolName,
+      sceneName: pending.sceneName,
+      secret,
+      suggested: approved,
+    }));
   });
 
   app.post("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
-    let body: Record<string, unknown>;
-    try { body = await c.req.json<Record<string, unknown>>(); } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
-    }
+    // The confirmation page (GET above) posts a form, and gets a page back whatever the outcome;
+    // channel receivers and the dashboard send JSON and get JSON. Which one it is comes from the
+    // body, not from the Content-Type alone (readApprovalCallbackBody). A body that decides nothing
+    // gets 400 and the request stays pending.
+    const body = readApprovalCallbackBody(await c.req.text(), c.req.header("Content-Type"));
+    if (body.kind === "invalid-form") return c.html(approvalNoDecisionPage(), 400);
+    if (body.kind === "invalid-json") return c.json({ error: "Invalid JSON body" }, 400);
+    const fromForm = body.kind === "form";
+    const notFound = () => (fromForm ? c.html(APPROVAL_NOT_FOUND_PAGE, 404) : c.json({ error: APPROVAL_NOT_FOUND }, 404));
 
-    const approved = Boolean(body["approved"]);
-    const bodySecret = body["secret"] ? String(body["secret"]) : "";
+    const { approved, secret: bodySecret } = body;
     const bearer = extractBearerToken(c.req.header("Authorization")) ?? "";
-
-    const pending = getPendingApproval(id);
-    if (!pending) return c.json({ error: "Approval request not found or already resolved" }, 404);
 
     // Two ways to authorize: the channel secret (Slack/webhook callbacks), OR a
     // valid operator JWT (the dashboard — so detached scene/job runs can be
-    // approved from the UI without knowing the per-approval secret).
+    // approved from the UI without knowing the per-approval secret). A caller
+    // with neither gets the answer an unknown id gets, pending or not.
     const operatorAuthed = bearer && await verifyToken(bearer);
+    const pending = getPendingApproval(id);
+    if (!pending) return notFound();
     if (!operatorAuthed && pending.secret && !approvalSecretMatches(pending.secret, bodySecret || bearer)) {
-      return c.json({ error: "Invalid approval secret" }, 403);
+      logRefusedApprovalSecret(id);
+      return notFound();
     }
 
     resolveApproval(id, approved);
+    if (fromForm) {
+      c.header("Cache-Control", "no-store");
+      return c.html(approvalResultPage(pending.toolName, approved));
+    }
     return c.json({ ok: true, approved });
   });
 
@@ -3652,10 +3815,14 @@ export function createGateway() {
   app.get("/api/channels/dead-letters", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    // Under multi-user auth the count for operators and above, the entries for admins
+    // (deadLetterAccess); any caller that signed in read both. With auth off, both, as before.
+    const access = await deadLetterAccess(c.req.header("Authorization"));
+    if (access === "none") return c.json({ error: "Operator role required" }, 403);
     try {
       return c.json({
         count: getDeadLetterCount(),
-        entries: readDeadLetters({ limit: 50 }),
+        entries: access === "entries" ? readDeadLetters({ limit: 50 }) : [],
       });
     } catch {
       return c.json({ count: 0, entries: [] });
@@ -3808,6 +3975,14 @@ export function createGateway() {
       return;
     }
 
+    // ── Route policies for the surfaces answered below, before Hono ─────────
+    // The /api/* policy gate is Hono middleware and never sees them; this
+    // applies the same policies (gateway/raw-policy-gate.ts). Unpoliced
+    // requests go on unchanged.
+    if (await gateRawHttp(req, res, pathname)) {
+      return;
+    }
+
     // ── Outbound MCP server (HTTP/SSE) ───────────────────────────────────────
     // Mounted at /mcp.  Handler enforces auth + transport dispatch; returns
     // true when the request belongs to MCP so we never hit Hono with it.
@@ -3877,6 +4052,21 @@ export function createGateway() {
             res.end(JSON.stringify({ error: "Unauthorized" }));
             return;
           }
+          // A turn runs agents and their tools, which on /api takes the operator rank (the mutation
+          // gate above); this stream checked only that the caller was signed in, so a viewer ran
+          // full turns here. Ranked the same way, so an extension role at operator rank passes.
+          if (getConfig().auth?.enabled === true && aguiUser && !userHasRole(aguiUser, "operator")) {
+            logAudit("rbac_denied", {
+              surface: "agui",
+              username: aguiUser.username,
+              role: aguiUser.role,
+              method: "POST",
+              path: pathname,
+            }, { userId: aguiUser.username, severity: "warn" });
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Operator role required for this action" }));
+            return;
+          }
           await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role, identity: callerIdentity(aguiUser) });
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -3890,6 +4080,13 @@ export function createGateway() {
     // POST /a2a/agents/:name  — JSON-RPC 2.0 task delegation
     const a2aMatch = pathname.match(/^\/a2a\/agents\/([^/?]+)$/);
     if (req.method === "POST" && a2aMatch) {
+      // Deprecated in favour of /a2a/v1, and served whatever a2a.enabled says; a deployment that does
+      // not use it turns it off with a2a.legacyAgentRoute: false.
+      if (getConfig().a2a?.legacyAgentRoute === false) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32601, message: "Method not found" }, id: null }));
+        return;
+      }
       const token = req.headers["authorization"]
         ? extractBearerToken(req.headers["authorization"] as string)
         : null;
@@ -3909,6 +4106,25 @@ export function createGateway() {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
         return;
+      }
+      // Running an agent takes the operator rank, as on /api (the mutation gate) and on tasks/send at
+      // /a2a/v1; a viewer ran any configured agent here. Ranked, so an extension role at operator
+      // rank passes.
+      if (a2aUser && !userHasRole(a2aUser, "operator")) {
+        logAudit("rbac_denied", {
+          surface: "a2a_legacy",
+          username: a2aUser.username,
+          role: a2aUser.role,
+          method: "POST",
+          path: pathname,
+        }, { userId: a2aUser.username, severity: "warn" });
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32003, message: "Operator role required" }, id: null }));
+        return;
+      }
+      if (!warnedLegacyA2aRoute) {
+        warnedLegacyA2aRoute = true;
+        log.warn("POST /a2a/agents/:name is deprecated: use JSON-RPC tasks/send at /a2a/v1, or set a2a.legacyAgentRoute to false if nothing calls it");
       }
       const a2aCaller = a2aUser?.username ?? (typeof verified.sub === "string" ? verified.sub : "authenticated");
 
@@ -3962,7 +4178,20 @@ export function createGateway() {
           const sessId = rpc.params?.["sessionId"]
             ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
-          const autoApprove = rpc.params?.["autoApprove"] === true;
+          // autoApprove grants the run's approval-gated calls (never a humanInLoopSteps step, see
+          // below, and a tool with an approval policy still goes to its approvers), so it is
+          // honoured only from a role at gateway.overrides.autoApproveMinRole; below it the run asks
+          // as it would without it (no channel here, so a gated call fails closed).
+          let autoApprove = rpc.params?.["autoApprove"] === true;
+          if (autoApprove && !mayAutoApprove(a2aUser?.role)) {
+            autoApprove = false;
+            logAudit("a2a_auto_approve_refused", {
+              agent: agentName,
+              username: a2aCaller,
+              role: a2aUser?.role ?? null,
+              minRole: autoApproveMinRole(),
+            }, { userId: a2aCaller, severity: "warn" });
+          }
 
           const runOptions: SubAgentRunOptions = {
             agentName,
@@ -3975,15 +4204,20 @@ export function createGateway() {
             workspacePath: a2aUser
               ? userWorkspaceRoot(getConfig().workspacePath, callerIdentity(a2aUser))
               : getConfig().workspacePath,
+            // autoApprove answers the run's approvals as --auto does, and like --auto it never
+            // answers a scene's humanInLoopSteps step, which the run reaches through run_workflow.
+            // There is nobody to ask here, so the step is refused, unless its scene sends it to an
+            // approvalChannel (tools/workflow-catalog.ts).
             approvalCallback: autoApprove
-              ? async () => true
+              ? autoApprovingCallback()
               : undefined,
             // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
-            // request context the run's own memory reads take their account from.
-            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser) } : {}),
+            // request context the run's own memory reads take their account from; its role beside
+            // it, for the run's role-aware tools and every delegation the run makes.
+            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser), userRole: a2aUser.role } : {}),
           };
           const result = a2aUser
-            ? await runWithRequestContext({ identity: callerIdentity(a2aUser) }, () => runSubAgent(runOptions))
+            ? await runWithRequestContext({ identity: callerIdentity(a2aUser), callerRole: a2aUser.role }, () => runSubAgent(runOptions))
             : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -4005,12 +4239,16 @@ export function createGateway() {
     const forwardedHeaders: Record<string, string> = { ...(req.headers as Record<string, string>) };
     delete forwardedHeaders["x-gateway-peer-addr"];
     forwardedHeaders["x-gateway-peer-addr"] = req.socket.remoteAddress ?? "unknown";
+    const bodyless = method === "GET" || method === "HEAD";
     const honoReq = new Request(requestUrl, {
       method,
       headers: forwardedHeaders,
-      body: method === "GET" || method === "HEAD" ? undefined : Readable.toWeb(req),
-      duplex: method === "GET" || method === "HEAD" ? undefined : "half",
+      body: bodyless ? undefined : Readable.toWeb(req),
+      duplex: bodyless ? undefined : "half",
     } as RequestInit & { duplex?: "half" });
+    // A body the handler answered without reading is dropped after the reply, within bounds, so the
+    // keep-alive connection can carry the client's next request (./unread-body.ts).
+    if (!bodyless) res.once("finish", () => discardUnreadBody(req));
     void Promise.resolve(app.fetch(honoReq)).then((honoRes: Response) => {
       const responseHeaders: Record<string, string> = {};
       honoRes.headers.forEach((value, key) => {
@@ -4138,21 +4376,60 @@ export function createGateway() {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
+    // Node takes its own error listener off the socket before it emits "upgrade", and ws adds one
+    // only inside handleUpgrade. The checks below await (the caller's token, the stores), and a
+    // client that reset the connection meanwhile raised an "error" with no listener: an uncaught
+    // exception, which shuts the gateway down. This covers the socket until it is handed over.
+    const onSocketError = (err: Error) => {
+      log.debug({ err, path: pathname }, "WebSocket upgrade socket failed before its handshake");
+      socket.destroy();
+    };
+    socket.on("error", onSocketError);
+    const handOver = (server: WebSocketServer, done: (ws: WebSocket) => void): void => {
+      if (socket.destroyed) return; // reset while the checks ran
+      socket.off("error", onSocketError);
+      server.handleUpgrade(req, socket, head, done);
+    };
+
     if (pathname === "/ws") {
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      // A route policy for GET /ws (raw-policy-gate.ts). A browser sees only the close code of a
+      // socket, not the status of a refused handshake (that surfaces as 1006 and the dashboard
+      // retries forever), so the upgrade completes and the socket closes with 4401/4403.
+      const refusal = await upgradePolicyRefusal(req);
+      if (refusal) {
+        if (refusal.status === 401) recordAuthFailure(req.socket.remoteAddress ?? "unknown");
+        handOver(wss, (ws) => {
+          if (refusal.status === 403) ws.close(4403, "Forbidden for this role");
+          else ws.close(4401, "Unauthorized");
+        });
+        return;
+      }
+      handOver(wss, (ws) => wss.emit("connection", ws, req));
       return;
     }
 
-    if (pathname.startsWith("/ws/browser-vnc")) {
+    // Exactly the browser view's own paths: the proxy ignores the rest of the path, so a prefix match
+    // handed it /ws/browser-vncX past a policy for /ws/browser-vnc/*.
+    if (pathname === "/ws/browser-vnc" || pathname.startsWith("/ws/browser-vnc/")) {
       const ip = req.socket.remoteAddress ?? "unknown";
       const token = url.searchParams.get("token") ?? extractBearerToken(req.headers["authorization"]);
       const rl = checkAuthRateLimit(ip);
       if (!rl.allowed) { socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n"); socket.destroy(); return; }
+      // A route policy for GET /ws/browser-vnc/* (raw-policy-gate.ts), refused before the upgrade.
+      const refusal = await upgradePolicyRefusal(req);
+      if (refusal) {
+        if (refusal.status === 401) recordAuthFailure(ip);
+        socket.write(refusal.status === 403 ? "HTTP/1.1 403 Forbidden\r\n\r\n" : "HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       // The live browser is reached only through this check, and the token rides in the query
       // string, past the /api middleware that refuses a revoked account: under multi-user auth the
       // caller is resolved against the stores here, so a deleted account's token cannot watch it.
+      const multiUser = getConfig().auth?.enabled === true;
+      const vncUser = token && multiUser ? await authenticatedUserFromToken(token) : null;
       const vncCallerValid = token
-        ? (getConfig().auth?.enabled === true ? await authenticatedUserFromToken(token) !== null : await verifyToken(token) !== null)
+        ? (multiUser ? vncUser !== null : await verifyToken(token) !== null)
         : false;
       if (!vncCallerValid) {
         recordAuthFailure(ip);
@@ -4161,7 +4438,22 @@ export function createGateway() {
         return;
       }
       clearAuthFailures(ip);
-      vncWss.handleUpgrade(req, socket, head, (ws) => vncWss.emit("connection", ws, req));
+      // The bridge carries input both ways to the one shared automation browser, which may be signed
+      // in to sites: driving it takes the operator rank, as on /api (the mutation gate). Ranked, so
+      // an extension role at operator rank passes.
+      if (vncUser && !userHasRole(vncUser, "operator")) {
+        logAudit("rbac_denied", {
+          surface: "browser_vnc",
+          username: vncUser.username,
+          role: vncUser.role,
+          method: "GET",
+          path: pathname,
+        }, { userId: vncUser.username, severity: "warn" });
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      handOver(vncWss, (ws) => vncWss.emit("connection", ws, req));
       return;
     }
 
@@ -4193,6 +4485,7 @@ export function createGateway() {
       }
 
       const port = config.gateway.port;
+      const host = gatewayListenHost(config.gateway);
       return new Promise<void>((resolve, reject) => {
         const handleError = (error: Error) => {
           httpServer.off("error", handleError);
@@ -4200,9 +4493,9 @@ export function createGateway() {
         };
 
         httpServer.once("error", handleError);
-        httpServer.listen(port, "0.0.0.0", () => {
+        httpServer.listen(port, host, () => {
           httpServer.off("error", handleError);
-          log.info({ port }, `Gateway listening — ws://0.0.0.0:${port}/ws`);
+          log.info({ host, port }, `Gateway listening — ws://${formatListenAddress(host, port)}/ws`);
           resolve();
         });
       });

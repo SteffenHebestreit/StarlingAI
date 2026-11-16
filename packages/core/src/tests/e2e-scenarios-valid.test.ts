@@ -32,6 +32,16 @@ describe("e2e scenario files", () => {
     expect(scenarios.some((entry) => entry.template && entry.scenario.id === "example-site-and-mail")).toBe(true);
   });
 
+  it("run no turn as a viewer, whose session.create and chat.send the gateway refuses", () => {
+    // Such a turn ends the attempt as a harness error, and only a run against a real gateway shows it:
+    // the isolation scenario asked as eval-viewer after the socket stopped taking a viewer's turns.
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const roleOf = (identity: string) => E2E_ACCOUNTS.find((account) => account.identity === identity)?.role;
+    const viewerTurns = scenarios.flatMap(({ scenario }) => scenario.steps.flatMap((step, index) =>
+      step.kind === "turn" && roleOf(step.as ?? scenario.identity ?? "eval") === "viewer" ? [`${scenario.id} step ${index + 1}`] : []));
+    expect(viewerTurns).toEqual([]);
+  });
+
   it("the intent-shadow scenario fails a broken readout that the row reports as a timeout, and tolerates a real one", () => {
     // After the readout failed (error, no_logprobs), the shadow still asks the pre-route question when
     // the turn had a capsule with agents; when that starves past the shadow's deadline, the row's

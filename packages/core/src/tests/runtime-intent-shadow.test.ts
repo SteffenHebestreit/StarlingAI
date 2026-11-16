@@ -61,6 +61,7 @@ async function loadRuntime(intentReadout: "off" | "shadow", opts: { capsule?: Ca
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     ...(opts.receptionist ? { receptionist: { enabled: true } } : {}),
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
@@ -109,7 +110,7 @@ async function loadRuntime(intentReadout: "off" | "shadow", opts: { capsule?: Ca
     import("../decisions/intent-readout.js"),
   ]);
   resetSessionsForTests();
-  return { AgentSession, runTurn, shadow, requestContext, INTENT_FACETS };
+  return { AgentSession, runTurn, shadow, requestContext, INTENT_FACETS, workspacePath: tempDir };
 }
 
 function tok(token: string, top: Array<[string, number]> = [[token, -0.01], ["\n", -6]]): LLMTokenLogprob {
@@ -206,10 +207,10 @@ describe("intentReadout through runTurn", () => {
   it("changes nothing the turn does: the same calls and the same answer, flag off or in shadow", async () => {
     const results: Array<{ response: string; streams: number; completes: number; shadowCallsAtResolve: number }> = [];
     for (const mode of ["off", "shadow"] as const) {
-      const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime(mode);
+      const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime(mode);
       wireProvider(INTENT_FACETS);
       const out = await runTurn({
-        session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+        session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
         userMessage: QUESTION,
       });
       // Resolved: the reply is out, and the shadow has not been asked yet.
@@ -234,9 +235,9 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("logs the readout beside the judge's verdict and the turn's own facts, attributed to the turn", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow");
     wireProvider(INTENT_FACETS);
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: QUESTION });
     await shadow.settleIntentShadowForTests();
     const row = shadowRows()[0] as { status: string; actual: Record<string, unknown>; readout: { facets: Record<string, { choice: string }> } };
@@ -258,9 +259,9 @@ describe("intentReadout through runTurn", () => {
   it("shadows a turn the front desk answered, and reads that off the turn's own row", async () => {
     // The one direct outcome decision=answer_direct is checked against. The front desk's row is
     // written inside the turn's request context, so the tap's own-turn filter (inTurn) keeps it.
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { receptionist: true });
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow", { receptionist: true });
     wireProvider(INTENT_FACETS);
-    const out = await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: "hi there" });
+    const out = await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: "hi there" });
     await shadow.settleIntentShadowForTests();
     // The orchestrator never ran: the reply is the front desk's.
     expect(streamMock).not.toHaveBeenCalled();
@@ -272,7 +273,7 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("is aborted by the next turn's start", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow");
     wireProvider(INTENT_FACETS);
     let aborted = false;
     completeMock.mockImplementation((messages: unknown, _tools: unknown, signal: AbortSignal | undefined, options?: CompletionCallOptions) => {
@@ -284,11 +285,11 @@ describe("intentReadout through runTurn", () => {
         reject(new DOMException("aborted", "AbortError"));
       }, { once: true }));
     });
-    await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: QUESTION });
+    await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: QUESTION });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(readoutCalls()).toHaveLength(1);
     expect(aborted).toBe(false);
-    await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: "and the one before that" });
+    await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: "and the one before that" });
     expect(aborted).toBe(true);
     await shadow.settleIntentShadowForTests();
     expect(shadowRows().map((row) => row["status"])).toEqual(["aborted", "ok"]);
@@ -297,9 +298,9 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("reads the new request against the PREVIOUS exchange, as the facet triage does", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow");
     wireProvider(INTENT_FACETS);
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" });
     await runTurn({ session, userMessage: "first question about rates" });
     await shadow.settleIntentShadowForTests();
     await runTurn({ session, userMessage: "and the one before that" });
@@ -319,10 +320,10 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("does not shadow a turn run inside another (a workflow step)", async () => {
-    const { AgentSession, runTurn, shadow, requestContext, INTENT_FACETS } = await loadRuntime("shadow");
+    const { AgentSession, runTurn, shadow, requestContext, INTENT_FACETS, workspacePath } = await loadRuntime("shadow");
     wireProvider(INTENT_FACETS);
     await requestContext.runWithRequestContext({ sessionId: "outer", agentName: "main", callSite: "main_turn" }, () => runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }),
       userMessage: QUESTION,
     }));
     await shadow.settleIntentShadowForTests();
@@ -331,9 +332,9 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("asks the pre-route question over the capsule the first iteration got", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { capsule: { agents: ["researcher", "web_coder"] } });
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow", { capsule: { agents: ["researcher", "web_coder"] } });
     wireProvider(INTENT_FACETS);
-    await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: QUESTION });
+    await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: QUESTION });
     expect(preRouteCalls()).toHaveLength(0);
     await shadow.settleIntentShadowForTests();
     expect(preRouteCalls()).toHaveLength(1);
@@ -344,9 +345,9 @@ describe("intentReadout through runTurn", () => {
   });
 
   it("does not count a capsule that came after the prompt stopped waiting for it", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow", { capsule: { agents: ["researcher"], delayMs: 2_700 } });
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow", { capsule: { agents: ["researcher"], delayMs: 2_700 } });
     wireProvider(INTENT_FACETS);
-    await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: QUESTION });
+    await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: QUESTION });
     await new Promise((resolve) => setTimeout(resolve, 400));
     await shadow.settleIntentShadowForTests();
     expect(preRouteCalls()).toHaveLength(0);
@@ -356,10 +357,10 @@ describe("intentReadout through runTurn", () => {
   }, 20_000);
 
   it("writes none of the user's words, nor the restatement, into the row", async () => {
-    const { AgentSession, runTurn, shadow, INTENT_FACETS } = await loadRuntime("shadow");
+    const { AgentSession, runTurn, shadow, INTENT_FACETS, workspacePath } = await loadRuntime("shadow");
     const canaryMessage = "Wie teuer ist das Zwitscherbaumticket beim Kanarienverkehrsverbund heute";
     wireProvider(INTENT_FACETS, "How expensive is the Pfefferminzkobold ticket today");
-    await runTurn({ session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "t" }), userMessage: canaryMessage });
+    await runTurn({ session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "t" }), userMessage: canaryMessage });
     await shadow.settleIntentShadowForTests();
     const rows = shadowRows();
     expect(rows).toHaveLength(1);

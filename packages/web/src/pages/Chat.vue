@@ -102,11 +102,17 @@
               {{ session.id.substring(0, 8) }}… · {{ chatText.sessionTurns(uiLanguage, session.turns) }}
             </option>
           </select>
-          <button type="button" class="actions-pod__item session-pod__new" @click="startNewSession">
+          <button
+            type="button"
+            class="actions-pod__item session-pod__new"
+            :disabled="newSessionBlockedReason !== ''"
+            :title="newSessionBlockedReason || undefined"
+            @click="startNewSession"
+          >
             <span class="actions-pod__glyph" aria-hidden="true">＋</span>
             <span class="actions-pod__text">
               <span class="actions-pod__label">{{ chatText.newSession(uiLanguage) }}</span>
-              <span class="actions-pod__hint">{{ chatText.newSessionHint(uiLanguage) }}</span>
+              <span class="actions-pod__hint">{{ newSessionBlockedReason || chatText.newSessionHint(uiLanguage) }}</span>
             </span>
           </button>
         </div>
@@ -263,7 +269,7 @@
               :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
               :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
               :fold-steps="msg.role === 'assistant' && msg.id !== 'streaming'"
-              :allow-rewind="!gateway.isLoading"
+              :allow-rewind="!gateway.isLoading && gateway.mayCall('session.rewind')"
               :live-at-orb="orbHasRoomForSteps"
               @rewind="handleRewind"
               @retry="handleRetry"
@@ -749,7 +755,7 @@
             ref="composerTextareaEl"
             v-model="inputText"
             @keydown="onComposerKeydown"
-            :disabled="!gateway.connected || Boolean(gateway.pendingInputRequest)"
+            :disabled="!gateway.connected || readOnly || Boolean(gateway.pendingInputRequest)"
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
@@ -946,7 +952,7 @@
                       v-for="scene in gateway.scenes"
                       :key="scene.name"
                       @click="triggerScene(scene.name)"
-                      :disabled="gateway.isLoading || !gateway.connected || isSceneRunning(scene.name)"
+                      :disabled="gateway.isLoading || !gateway.connected || readOnly || isSceneRunning(scene.name)"
                       :title="startButtonTitle(scene.description, startBlockedReason('scene', isSceneRunning(scene.name)))"
                       class="chat-scene-pill"
                     >
@@ -963,7 +969,7 @@
                       v-for="job in configuredJobs"
                       :key="job.name"
                       @click="triggerJob(job.name)"
-                      :disabled="gateway.isLoading || !gateway.connected || isJobRunning(job.name)"
+                      :disabled="gateway.isLoading || !gateway.connected || readOnly || isJobRunning(job.name)"
                       :title="startButtonTitle(job.description, startBlockedReason('job', isJobRunning(job.name)))"
                       class="chat-scene-pill"
                     >
@@ -1156,6 +1162,7 @@
                   class="effort-option"
                   :class="[tier === currentEffort ? 'effort-option--current' : '', tier === 'max' ? 'effort-option--caution' : '']"
                   :aria-checked="tier === currentEffort"
+                  :disabled="!mayChangeSettings"
                   @click="chooseEffort(tier)"
                 >
                   <span class="effort-option__name">
@@ -1188,6 +1195,7 @@
                 :title="chatText.imagesTitle(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
                 :aria-label="chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
                 :aria-pressed="gateway.currentSessionImageSettingsPrompt === 'ask'"
+                :disabled="!mayChangeSettings"
                 @click="toggleImageSettingsPrompt"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -1200,6 +1208,7 @@
             <button
               v-else
               @click="toggleImageSettingsPrompt"
+              :disabled="!mayChangeSettings"
               class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="gateway.currentSessionImageSettingsPrompt === 'auto' ? 'opacity-60 hover:opacity-100' : 'opacity-80 hover:opacity-100'"
               :title="chatText.imagesTitle(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
@@ -1288,7 +1297,7 @@
             <button
               v-if="gateway.isLoading"
               @click="sendMessage"
-              :disabled="!composerHasContent || !gateway.connected"
+              :disabled="!composerHasContent || !gateway.connected || readOnly"
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
               :title="sendBlockedReason || chatText.steerTitle(uiLanguage)"
             >
@@ -1297,7 +1306,7 @@
             <button
               v-else
               @click="sendMessage"
-              :disabled="!composerHasContent || !gateway.connected"
+              :disabled="!composerHasContent || !gateway.connected || readOnly"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
               :title="sendBlockedReason || undefined"
             >
@@ -1307,7 +1316,10 @@
         </div>
       </div>
 
-      <div class="text-xs text-gray-500 mt-1 px-1">
+      <div v-if="readOnly" class="text-xs text-gray-500 mt-1 px-1" role="note">
+        {{ chatText.viewerReadOnly(uiLanguage) }}
+      </div>
+      <div v-else class="text-xs text-gray-500 mt-1 px-1">
         {{ chatText.guardrailsLine(uiLanguage) }} <code class="font-mono whitespace-nowrap">--auto</code> <code class="font-mono whitespace-nowrap">--iter N</code> <code class="font-mono whitespace-nowrap">--agent NAME</code> <code class="font-mono whitespace-nowrap">--timeout N</code> <code class="font-mono whitespace-nowrap">--effort TIER</code>
       </div>
     </div>
@@ -1426,6 +1438,7 @@ import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useFocusTrap } from "@/composables/useFocusTrap";
 import { confirmAction } from "@/composables/useConfirm";
 import { browserLanguage, chatText } from "@/composables/chatText";
+import { parseJobCommand, submitJobCommand } from "@/composables/jobCommand";
 import { podLanes } from "@/composables/podLanes";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
@@ -1434,6 +1447,8 @@ import ShellSessionPanel from "@/components/ShellSessionPanel.vue";
 import SidePanel from "@/components/SidePanel.vue";
 import type { ChatAttachment } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
+import { forbiddenReason } from "@/composables/rpcErrors";
+import type { TurnLanguage } from "@/composables/turnText";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -1530,15 +1545,24 @@ const offlineReason = computed(() => {
     ? chatText.notConnectedConnecting(uiLanguage)
     : chatText.notConnectedSignIn(uiLanguage);
 });
+/**
+ * Why this connection may not send at all, or "": its role may not call chat.send (a viewer, or an
+ * extension role below operator), as the gateway listed the methods it may call at the handshake.
+ */
+const readOnlyReason = computed(() => (gateway.mayCall("chat.send") ? "" : chatText.viewerReadOnly(uiLanguage)));
+const readOnly = computed(() => readOnlyReason.value !== "");
+/** Whether the session's effort and image settings may be changed from here. */
+const mayChangeSettings = computed(() => gateway.mayCall("session.updateSettings"));
 /** Why nothing can be typed, for the field's placeholder — or "" while it can. */
 const composerBlockedReason = computed(() =>
-  offlineReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
+  offlineReason.value || readOnlyReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
 /** Why Send (or Steer) is disabled, or "". */
 const sendBlockedReason = computed(() =>
-  offlineReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
+  offlineReason.value || readOnlyReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
 /** Why a scene or job cannot be started from its button right now, or "". */
 function startBlockedReason(kind: "scene" | "job", running: boolean): string {
   if (offlineReason.value) return offlineReason.value;
+  if (readOnlyReason.value) return readOnlyReason.value;
   if (running) return kind === "scene" ? chatText.sceneRunning(uiLanguage) : chatText.jobRunning(uiLanguage);
   return gateway.isLoading ? chatText.waitForTurn(uiLanguage) : "";
 }
@@ -1547,7 +1571,7 @@ function startButtonTitle(description: string | undefined, reason: string): stri
   if (!reason) return description;
   return description ? `${reason}\n${description}` : reason;
 }
-const showStarters = computed(() => startersVisible({
+const showStarters = computed(() => !readOnly.value && startersVisible({
   connected: gateway.connected,
   transcriptLoading: gateway.currentSessionTranscriptLoading,
   turnRunning: gateway.isLoading,
@@ -1765,7 +1789,7 @@ interface FlagChip {
 const activeFlags = computed<FlagChip[]>(() => {
   const text = inputText.value;
   const chips: FlagChip[] = [];
-  if (/--auto\b/.test(text)) chips.push({ label: "--auto: skip approvals", pattern: /\s*--auto\b/g, color: "amber" });
+  if (/--auto\b/.test(text)) chips.push({ label: "--auto: auto-approve (scene steps still ask)", pattern: /\s*--auto\b/g, color: "amber" });
   const iterMatch = text.match(/--iter\s+(\d+)\b/);
   if (iterMatch) chips.push({ label: `--iter ${iterMatch[1]}`, pattern: /\s*--iter\s+\d+\b/, color: "sky" });
   const agentMatch = text.match(/--agent\s+(\S+)/);
@@ -2016,17 +2040,28 @@ const sessionActions = computed((): SessionAction[] => {
   const busy = exportingTranscript.value;
   const noMessages = gateway.messages.length === 0;
   const whyNot = busy ? chatText.exportRunning(l) : chatText.nothingToExport(l);
+  // What this connection's role may not do (a viewer may not archive or reset a session) is
+  // offered greyed, with the reason, as the composer is.
+  const unlessMay = (method: string): Partial<SessionAction> =>
+    gateway.mayCall(method) ? {} : { disabled: true, disabledReason: chatText.notForYourRole(l) };
   return [
     { key: "md",    glyph: "MD",  label: chatText.markdownTitle(l), hint: chatText.actionMarkdownHint(l), disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportMarkdown(); } },
     { key: "pdf",   glyph: "PDF", label: chatText.pdfTitle(l),      hint: chatText.actionPdfHint(l),      disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportPDF(); } },
     { key: "debug", glyph: "DBG", label: chatText.actionDebug(l),   hint: chatText.actionDebugHint(l),    disabled: busy, disabledReason: whyNot, run: () => { void exportDebugMarkdown(); } },
     { key: "audit", glyph: "AUD", label: chatText.actionAudit(l),   hint: chatText.actionAuditHint(l),    disabled: busy, disabledReason: whyNot, run: () => { void exportAuditMarkdown(); } },
-    { key: "arch",  glyph: "ARC", label: chatText.actionArchive(l), hint: chatText.actionArchiveHint(l),  run: () => { void archiveCurrentSession(); } },
-    { key: "reset", glyph: "RST", label: chatText.actionReset(l),   hint: chatText.actionResetHint(l), danger: true, run: () => { void resetSession(); } },
+    { key: "arch",  glyph: "ARC", label: chatText.actionArchive(l), hint: chatText.actionArchiveHint(l),  ...unlessMay("session.archive"), run: () => { void archiveCurrentSession(); } },
+    { key: "reset", glyph: "RST", label: chatText.actionReset(l),   hint: chatText.actionResetHint(l), danger: true, ...unlessMay("session.reset"), run: () => { void resetSession(); } },
   ];
 });
+/**
+ * Why the session's menu offers no new session, or "": this connection's role may not call
+ * session.create (a viewer). The entry is greyed with the reason, as the session actions are.
+ */
+const newSessionBlockedReason = computed(() =>
+  gateway.mayCall("session.create") ? "" : chatText.notForYourRole(uiLanguage));
 /** From the session's menu: a fresh conversation. */
 function startNewSession(): void {
+  if (newSessionBlockedReason.value) return;
   sessionOpen.value = false;
   void gateway.createSession();
 }
@@ -3252,13 +3287,13 @@ async function sendMessage() {
     showSteeringNote(chatText.stillReadingAttachments(uiLanguage), "error");
     return;
   }
-  const jobMatch = !hasImages && !hasDocs
-    ? trimmedText.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s)
-    : null;
-  if (jobMatch && jobMatch[1]?.toLowerCase() !== "help") {
+  const jobCommand = !hasImages && !hasDocs ? parseJobCommand(trimmedText) : null;
+  if (jobCommand) {
     inputText.value = "";
-    const params = parseInlineParams(jobMatch[2] ?? "");
-    await scenesStore.runJob(jobMatch[1]!, Object.keys(params).length > 0 ? params : undefined);
+    // Queued over REST, not as a turn: a job that was not queued (unknown, or a parameter the
+    // input guardrail refused) says why here and hands the command back (composables/jobCommand.ts).
+    const outcome = await submitJobCommand(trimmedText, jobCommand, scenesStore.runJob, () => scenesStore.runError);
+    if (!outcome.queued) giveBackUnsentText(outcome.text, new Error(outcome.reason));
     return;
   }
 
@@ -3372,7 +3407,17 @@ async function sendMessage() {
  */
 function giveBackUnsentText(text: string, error: unknown): void {
   if (text && !inputText.value.trim()) inputText.value = text;
-  showSteeringNote(chatText.notSent(uiLanguage, error instanceof Error ? error.message : String(error)), "error");
+  showSteeringNote(failureNote(chatText.notSent, error), "error");
+}
+
+/**
+ * What the note under the field says when an action failed: `couldNot` with the reason, or, when the
+ * gateway refused this connection's role ("Forbidden: ..."), an access message, not a failure to retry.
+ */
+function failureNote(couldNot: (language: TurnLanguage, reason: string) => string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const noAccess = forbiddenReason(message);
+  return noAccess === null ? couldNot(uiLanguage, message) : chatText.noAccess(uiLanguage, noAccess);
 }
 
 /** Why an attachment failed, with the file it is about: there may be several. */
@@ -3485,7 +3530,7 @@ async function handleRewind(messageId: string) {
   } catch (err) {
     // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
     composerOpen.value = true;
-    showSteeringNote(chatText.couldNotRestart(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
+    showSteeringNote(failureNote(chatText.couldNotRestart, err), "error");
   }
 }
 
@@ -3516,7 +3561,7 @@ async function archiveCurrentSession() {
     await gateway.archiveSession(gateway.currentSessionId);
   } catch (err) {
     composerOpen.value = true;
-    showSteeringNote(chatText.couldNotArchive(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
+    showSteeringNote(failureNote(chatText.couldNotArchive, err), "error");
   }
 }
 
@@ -3549,14 +3594,6 @@ function isSceneRunning(name: string): boolean {
 
 function isJobRunning(name: string): boolean {
   return scenesStore.runningJobs.some((job) => job.definitionType === "job" && job.sceneName === name);
-}
-
-function parseInlineParams(raw: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  for (const match of raw.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)) {
-    params[match[1]!] = (match[2] ?? "").replace(/^"|"$/g, "").replace(/\\"/g, '"');
-  }
-  return params;
 }
 
 function formatSceneName(name: string | undefined): string {
@@ -3942,7 +3979,13 @@ watch(() => gateway.isLoading, (loading) => {
 });
 watch(() => gateway.connected, async (connected) => {
   if (!connected) return;
-  if (!gateway.currentSessionId) await gateway.createSession();
+  // Only a connection that may open a session opens one (hello-ok lists what it may call): a viewer
+  // reads its chats. A refusal thrown here left the scenes, the jobs and the media settings below
+  // unloaded, so one that comes anyway (the role changed since the handshake) is let go: the next
+  // send says why.
+  if (!gateway.currentSessionId && gateway.mayCall("session.create")) {
+    await gateway.createSession().catch(() => undefined);
+  }
   await multimodalStore.fetch();
   await gateway.loadScenes();
   await jobsStore.fetch();

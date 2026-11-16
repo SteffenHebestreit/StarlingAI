@@ -61,6 +61,7 @@ async function resolveWith(scores: Record<string, number>, agents: Record<string
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-near-miss-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: agents,
     retrieval: { reranker: { enabled: false } },
@@ -177,6 +178,7 @@ describe("near-miss telemetry", () => {
     tempDir = mkdtempSync(join(tmpdir(), "starlingai-near-miss-excl-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
       subAgents: AGENTS,
       retrieval: { reranker: { enabled: false } },

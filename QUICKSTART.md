@@ -53,6 +53,8 @@ Stopping the stack:
 | `pnpm sai stop` | Stop all containers and networks (data volumes preserved) |
 | `pnpm sai stop --volumes` | Stop all services and wipe all data volumes |
 
+**Local compose adjustments.** This repository ships no `docker-compose.override.yml`; an operator or a fork may add one next to `docker-compose.yml`. `sai start`, `sai stop` and the one-click launchers load it last, after `docker-compose.yml` and the overlays they add (GPU, e2e), so its settings win, and they print `docker-compose.override.yml found — loaded last` when they do. Plain `docker compose` reads that file on its own only when it is given no `-f`; `sai` passes `-f`, so it names the file explicitly. Compose adds an override's `tmpfs` and `ports` entries to the base file's instead of replacing them, so do not list a tmpfs path again that `docker-compose.yml` already mounts: the `web` service's `/var/cache/nginx` is a tmpfs there, resized with `SAI_WEB_TMPFS_SIZE` ([security.md](docs/security.md#dashboard-proxy-no-request-data-on-disk)).
+
 ## Optional Services
 
 Optional services are gated behind Docker Compose profiles. The simplest way to include them is to pass the matching flag to `sai start` (see the table above). To toggle a single profile on an already-running stack without restarting the core services, drive Docker Compose directly:

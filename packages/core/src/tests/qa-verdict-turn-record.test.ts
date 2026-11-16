@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const streamMock = vi.hoisted(() => vi.fn());
@@ -66,6 +69,17 @@ const ANSWER = "Hier ist dein Bild: ein realistischer Sonnenuntergang am Strand,
 
 const user = (content: string, metadata?: Record<string, unknown>) => ({ role: "user", content, ...(metadata ? { metadata } : {}) });
 const tool = (metadata: Record<string, unknown>) => ({ role: "tool", content: "ok", metadata });
+
+/** Each turn's own workspace: a turn reads the workspace's memory, skills and files. */
+const workspaces: string[] = [];
+function tempWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), "sai-qa-turn-record-"));
+  workspaces.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("formatQaTurnRecord", () => {
   it("lists the file with the tier and model its tool recorded, and the user's words, with a rule for each", () => {
@@ -140,7 +154,7 @@ describe("the QA delivery verdict at runtime", () => {
     getConfig().orchestration.qaDeliveryLoop = true;
     // The final answer, not a relayed specialist output, is what this checks.
     getConfig().orchestration.relaySingleDeliverable = false;
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath: tempWorkspace(), systemPrompt: "You are a test agent." });
     let llmCalls = 0;
     streamMock.mockImplementation(() => {
       llmCalls += 1;

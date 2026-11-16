@@ -204,8 +204,8 @@ describe("config loader mutable overlay", () => {
       expect(config.agents.rateLimit.requestsPerMinute).toBe(15);
       expect(config.providers.lmstudio?.baseUrl).toBe("http://split-config-lmstudio:1234/v1");
       expect(config.channels.webchat.port).toBe(3301);
-      expect(existsSync(compiledPath)).toBe(true);
-      expect(readFileSync(compiledPath, "utf8")).toContain('"delegate_only"');
+      // Loading writes nothing next to the config directory: `sai config build` owns that file.
+      expect(existsSync(compiledPath)).toBe(false);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -665,8 +665,8 @@ describe("config loader mutable overlay", () => {
 
   // The A2A client lays each peer skill over the loaded config as a sub-agent. Every save reloads,
   // and the reload dropped them until the next card refresh (r4 A-security #3). They are not config,
-  // so a preview (what a save is judged on) and the compiled artifact the bidder reads stay without.
-  it("lays a runtime sub-agent back over each reload, and keeps it out of the preview and the compiled artifact", async () => {
+  // so a preview (what a save is judged on) and the save itself stay without.
+  it("lays a runtime sub-agent back over each reload, and keeps it out of the preview and the save", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-runtime-agent-"));
     const configDir = join(tempDir, "starling_config");
     mkdirSync(join(configDir, "agents"), { recursive: true });
@@ -689,9 +689,11 @@ describe("config loader mutable overlay", () => {
       expect(configLoader.isRuntimeSubAgent("a2a__peer__skill")).toBe(true);
       expect(configLoader.isRuntimeSubAgent("coder")).toBe(false);
       expect(configLoader.previewConfigUpdate(() => {}).subAgents["a2a__peer__skill"]).toBeUndefined();
-      const compiled = readFileSync(join(tempDir, PRODUCT.configFileName), "utf8");
-      expect(compiled).toContain("Writes tests.");
-      expect(compiled).not.toContain("a2a__peer__skill");
+      // The save writes the runtime overlay without it, and no compiled copy at all.
+      const saved = readFileSync(join(configDir, "runtime", "runtime.overrides.json"), "utf8");
+      expect(saved).toContain("Writes tests.");
+      expect(saved).not.toContain("a2a__peer__skill");
+      expect(existsSync(join(tempDir, PRODUCT.configFileName))).toBe(false);
 
       configLoader.deleteRuntimeSubAgent("a2a__peer__skill");
       expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();

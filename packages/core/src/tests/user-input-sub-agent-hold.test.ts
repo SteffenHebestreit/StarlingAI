@@ -37,6 +37,7 @@ describe("holdTurnClocks inside a specialist", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         image_creator: {
           description: "Renders images",
@@ -86,19 +87,19 @@ describe("holdTurnClocks inside a specialist", () => {
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
         finishReason: "stop",
       });
-    return { runSubAgentWithStats, longRunningGenerationManager, seen };
+    return { runSubAgentWithStats, longRunningGenerationManager, seen, workspacePath: tempDir };
   }
 
   it("holds the specialist's deadline through the render and credits it afterwards", async () => {
     // A 1 s deadline and a 2 s render: unheld, the deadline latches mid-render and the run comes
     // back from it into timeout synthesis.
-    const { runSubAgentWithStats, seen } = await loadWithRenderTool(1_000, 2_000);
+    const { runSubAgentWithStats, seen, workspacePath } = await loadWithRenderTool(1_000, 2_000);
     const handedDeadline = Date.now() + 60_000;
     const result = await runSubAgentWithStats({
       agentName: "image_creator",
       task: "Render the harbour at sunset.",
       parentSessionId: "chat-hold",
-      workspacePath: "/workspace",
+      workspacePath,
       _turnDeadlineMs: handedDeadline,
     });
 
@@ -111,7 +112,7 @@ describe("holdTurnClocks inside a specialist", () => {
 
   it("does not ask \"keep going?\" about minutes it was held", async () => {
     // Past the 3-minute soft threshold in wall time, almost none of it the run's own.
-    const { runSubAgentWithStats, longRunningGenerationManager } = await loadWithRenderTool(600_000, 200_000);
+    const { runSubAgentWithStats, longRunningGenerationManager, workspacePath } = await loadWithRenderTool(600_000, 200_000);
     const notify = vi.spyOn(longRunningGenerationManager, "notifyLongRunning");
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     let result: Awaited<ReturnType<typeof runSubAgentWithStats>> | undefined;
@@ -119,7 +120,7 @@ describe("holdTurnClocks inside a specialist", () => {
       agentName: "image_creator",
       task: "Render the harbour at sunset.",
       parentSessionId: "chat-held-lrg",
-      workspacePath: "/workspace",
+      workspacePath,
     }).then((out) => { result = out; });
     for (let step = 0; step < 600 && !result; step += 1) {
       await vi.advanceTimersByTimeAsync(1_000);

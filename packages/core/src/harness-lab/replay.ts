@@ -9,7 +9,7 @@
  * applied or a prompt edited, nothing recorded against the old prompts is served again.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export function sha256(value: unknown): string {
@@ -56,9 +56,20 @@ export function readNightlyState(root: string): NightlyState {
 
 export function writeNightlyState(root: string, state: NightlyState): void {
   mkdirSync(root, { recursive: true });
-  const file = join(root, "state.json");
-  writeFileSync(`${file}.tmp`, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  renameSync(`${file}.tmp`, file);
+  writeThroughTemp(join(root, "state.json"), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+/** `text` into `file` through a temp file and a rename. A write or rename that fails removes the temp
+ *  file (a cut-short write leaves part of the text in it) and throws its own error. */
+function writeThroughTemp(file: string, text: string): void {
+  const temp = `${file}.tmp`;
+  try {
+    writeFileSync(temp, text, "utf8");
+    renameSync(temp, file);
+  } catch (err) {
+    try { rmSync(temp, { force: true }); } catch { /* the write's failure is what matters */ }
+    throw err;
+  }
 }
 
 export interface ReplayStats {
@@ -88,9 +99,7 @@ export class ReplayCache {
       }
     }
     const value = await produce();
-    const temp = `${file}.tmp`;
-    writeFileSync(temp, JSON.stringify({ value }), "utf8");
-    renameSync(temp, file);
+    writeThroughTemp(file, JSON.stringify({ value }));
     this.stats.recorded += 1;
     return value;
   }
