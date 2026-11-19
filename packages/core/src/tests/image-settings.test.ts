@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { crc32, deflateSync } from "node:zlib";
 import Jimp from "jimp";
+import { imageRequestFields } from "./helpers/image-request-fields.js";
 import {
   decodesWithinDeclaredSize,
   measureImage,
@@ -440,7 +441,7 @@ describe("an edit with no size renders at its base's size", () => {
   function stubEdits() {
     const bodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const body = await imageRequestFields(init?.body);
       bodies.push(body);
       return new Response(JSON.stringify({
         data: [{ b64_json: "QUJD" }],
@@ -460,7 +461,7 @@ describe("an edit with no size renders at its base's size", () => {
     expect(result).toMatchObject({ width: 1024, height: 768 });
   });
 
-  it("still honours an explicit size, a fixed-size engine and a base outside the bounds", async () => {
+  it("still honours an explicit size and a fixed-size engine, and keeps the shape of a base outside the bounds", async () => {
     const bodies = stubEdits();
     const base = (await png(1024, 768)).toString("base64");
 
@@ -470,8 +471,10 @@ describe("an edit with no size renders at its base's size", () => {
     const fixedEditor = { ...CONFIG, fixedSizeModels: ["image", "image-quality"] };
     expect(previewImageRequest(fixedEditor, { prompt: "x", initImage: base }, { width: 1024, height: 768 }))
       .toMatchObject({ width: 1024, height: 1024 });
+    // A phone photo renders at the default's area in its own shape, not squashed into the
+    // default square (session bf079002).
     expect(previewImageRequest(CONFIG, { prompt: "x", initImage: base }, { width: 4032, height: 3024 }))
-      .toMatchObject({ width: 1024, height: 1024 });
+      .toMatchObject({ width: 1184, height: 896 });
     // A new picture never takes a base's size.
     expect(previewImageRequest(CONFIG, { prompt: "x", tier: "quality" }, { width: 1024, height: 768 }))
       .toMatchObject({ width: 1024, height: 1024 });
@@ -877,13 +880,13 @@ describe("the agent's own base is always on offer", () => {
     const phone = pngDeclaring(4032, 3024);
     const candidates = await collectBaseCandidates([{ relativePath: "uploads/phone.png", source: "agent", read: async () => phone }], 6);
     const proposal = buildImageSettingsProposal(CONFIG, { prompt: "make the sky warmer", initImage: phone.toString("base64") }, candidates);
-    expect(proposal.agent).toMatchObject({ baseCandidateId: "c1", width: 1024, height: 1024 });
+    expect(proposal.agent).toMatchObject({ baseCandidateId: "c1", width: 1184, height: 896 });
     expect(proposal.baseCandidates[0]).toMatchObject({ id: "c1", fitsBounds: false });
     const context = { config: CONFIG, proposal, candidates };
     const answer = {
       choice: "configure",
       settings: {
-        tier: "quality", prompt: "make the sky warmer", negativePrompt: "", width: 1024, height: 1024,
+        tier: "quality", prompt: "make the sky warmer", negativePrompt: "", width: 1184, height: 896,
         steps: 30, guidanceScale: 1, seed: null, edit: { baseCandidateId: "c1", strength: 0.45 },
       },
     };
@@ -894,7 +897,7 @@ describe("the agent's own base is always on offer", () => {
 
     const atOwnSize = await validateImageSettingsAnswer(withSettings(answer, { width: 4032, height: 3024 }), context);
     expect((atOwnSize as { errors: Array<{ message: string }> }).errors.map((error) => error.message))
-      .toEqual(["must be 1024x1024; the base picture is too large to edit at its own size"]);
+      .toEqual(["must be 1184x896; the base picture is too large to edit at its own size"]);
     const masked = await validateImageSettingsAnswer(withEdit(answer, { maskDataUrl: dataUrl(await maskPng(320, 256, { x: 0, y: 0, w: 8, h: 8 })) }), context);
     expect((masked as { errors: Array<{ field: string; message: string }> }).errors)
       .toEqual([{ field: "settings.edit.maskDataUrl", message: "this picture is too large to paint a mask on; render without one" }]);

@@ -256,15 +256,15 @@
           class="message-usage"
           :title="usageTooltip"
         >
-          <span v-if="message.usage && message.usage.totalTokens > 0" class="message-usage__chip" aria-label="Total tokens">
-            <span class="message-usage__value">{{ formatTokens(message.usage.totalTokens) }}</span>
+          <span v-if="turnTokens > 0" class="message-usage__chip" aria-label="Total tokens">
+            <span class="message-usage__value">{{ formatTokens(turnTokens) }}</span>
             <span class="message-usage__label">tok</span>
           </span>
           <span v-if="message.perf && message.perf.turnDurationMs > 0" class="message-usage__chip" aria-label="Turn duration">
             <span class="message-usage__value">{{ formatDuration(message.perf.turnDurationMs) }}</span>
           </span>
-          <span v-if="message.perf && message.perf.llmCalls > 1" class="message-usage__chip" aria-label="LLM call count">
-            <span class="message-usage__value">{{ message.perf.llmCalls }}</span>
+          <span v-if="turnModelCalls > 1" class="message-usage__chip" aria-label="Model call count">
+            <span class="message-usage__value">{{ turnModelCalls }}</span>
             <span class="message-usage__label">LLM</span>
           </span>
           <span v-if="message.perf && message.perf.toolIterations > 0" class="message-usage__chip" aria-label="Tool iterations">
@@ -1295,21 +1295,52 @@ function formatDuration(ms: number): string {
   return `${(ms / 60000).toFixed(1)}m`;
 }
 
+/**
+ * Whether the turn's figures count every agent's model calls (allModelCalls), not only the main
+ * assistant's. They used to be the main assistant's alone: a turn that delegated read "LLM time
+ * 20.5 s" over a 4.9-minute turn whose researcher spent most of it in its own model calls.
+ */
+const allAgentsCounted = computed(() => typeof props.message.perf?.allModelCalls === "number" && props.message.perf.allModelCalls > 0);
+/** The turn's tokens: every agent's when the gateway counted them, else the main assistant's. */
+const turnTokens = computed(() => {
+  const perf = props.message.perf;
+  if (allAgentsCounted.value && perf) return (perf.allPromptTokens ?? 0) + (perf.allCompletionTokens ?? 0);
+  return props.message.usage?.totalTokens ?? 0;
+});
+/** The turn's model calls: every agent's when the gateway counted them, else the main assistant's. */
+const turnModelCalls = computed(() => {
+  const perf = props.message.perf;
+  if (!perf) return 0;
+  return allAgentsCounted.value ? perf.allModelCalls ?? 0 : perf.llmCalls;
+});
+
+const plural = (count: number, word: string): string => `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
+
 // Per-turn cost / perf chip tooltip — full breakdown for operators who care
-// about prompt vs completion tokens, LLM time vs total turn time, etc.
+// about prompt vs completion tokens, model time vs total turn time, etc.
 const usageTooltip = computed(() => {
   const parts: string[] = [];
   const usage = props.message.usage;
   const perf = props.message.perf;
-  if (usage) {
+  if (perf && allAgentsCounted.value) {
+    const prompt = perf.allPromptTokens ?? 0;
+    const completion = perf.allCompletionTokens ?? 0;
+    parts.push(`Tokens, all agents: ${(prompt + completion).toLocaleString()} (prompt ${prompt.toLocaleString()}, completion ${completion.toLocaleString()})`);
+    if (usage) parts.push(`  main assistant: ${usage.totalTokens.toLocaleString()} (prompt ${usage.promptTokens.toLocaleString()}, completion ${usage.completionTokens.toLocaleString()})`);
+  } else if (usage) {
     parts.push(`Prompt tokens: ${usage.promptTokens.toLocaleString()}`);
     parts.push(`Completion tokens: ${usage.completionTokens.toLocaleString()}`);
     parts.push(`Total tokens: ${usage.totalTokens.toLocaleString()}`);
   }
   if (perf) {
-    if (usage) parts.push("");
+    if (parts.length > 0) parts.push("");
     parts.push(`Turn duration: ${formatDuration(perf.turnDurationMs)}`);
-    parts.push(`LLM time: ${formatDuration(perf.llmTimeMs)} across ${perf.llmCalls} call${perf.llmCalls === 1 ? "" : "s"}`);
+    if (allAgentsCounted.value) {
+      parts.push(`Model time, all agents: ${formatDuration(perf.allModelTimeMs ?? 0)} over ${plural(perf.allModelCalls ?? 0, "call")} (calls that ran side by side each count)`);
+      parts.push(`  main assistant: ${formatDuration(perf.llmTimeMs)} over ${plural(perf.llmCalls, "call")}`);
+    } else {
+      parts.push(`Model time, main assistant: ${formatDuration(perf.llmTimeMs)} over ${plural(perf.llmCalls, "call")}`);
+    }
     parts.push(`Tool iterations: ${perf.toolIterations}`);
     parts.push(`Finish: ${perf.finishReason}`);
   }

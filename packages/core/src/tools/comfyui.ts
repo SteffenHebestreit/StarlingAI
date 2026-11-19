@@ -128,7 +128,7 @@ async function loadWorkflow(endpoint: ComfyUiEndpoint, source: string, ctx: Tool
     return asApiGraph(endpoint, await readLibrary(endpoint, name.endsWith(".json") ? name : `${name}.json`), `editor workflow ${name}`);
   }
   if (extname(source).toLowerCase() === ".png") {
-    const file = await readWorkspaceBinaryFile(source, ctx.workspacePath);
+    const file = await readWorkspaceBinaryFile(source, ctx.workspacePath, ctx.sessionId);
     const embedded = readPngWorkflow(Buffer.from(file.bytes));
     if (embedded.prompt !== undefined && isApiGraph(embedded.prompt)) return { graph: embedded.prompt, from: `the workflow inside ${file.relativePath}` };
     if (embedded.workflow !== undefined) return asApiGraph(endpoint, embedded.workflow, `the workflow inside ${file.relativePath}`);
@@ -555,8 +555,9 @@ function whereToChange(graph: ApiGraph, catalog: NodeCatalog): string {
  * names a picture by its place ("generated/comfyui/fox_snow_base.png"), and the lab's image_creator
  * gave the next run "fox_snow_base.png": the run failed with ENOENT and the workspace's internal
  * path, the agent tried to repair the workflow by hand, and the upscale it was for never ran.
- * Tried in order: the path as written, the same path where a write puts it, and the same path in the
- * folder this tool saves its pictures in. Null when none of them is there.
+ * Tried in order: the path as written, the same path where a write puts it, the same path in the
+ * folder this tool saves its pictures in, and last a file the person attached under that name
+ * (readWorkspaceBinaryFile with the session). Null when none of them is there.
  */
 async function readInputPicture(path: string, ctx: ToolContext): Promise<Awaited<ReturnType<typeof readWorkspaceBinaryFile>> | null> {
   const names = [
@@ -564,9 +565,11 @@ async function readInputPicture(path: string, ctx: ToolContext): Promise<Awaited
     () => resolveWorkspaceWritePath(path, ctx.workspacePath).relativePath,
     () => resolveWorkspaceWritePath(`comfyui/${path}`, ctx.workspacePath).relativePath,
   ];
-  for (const name of names) {
+  for (const [index, name] of names.entries()) {
     try {
-      return await readWorkspaceBinaryFile(name(), ctx.workspacePath);
+      // The attachment lookup only once the agent's own places are tried: a picture it made under
+      // a name wins over an upload that happens to share it.
+      return await readWorkspaceBinaryFile(name(), ctx.workspacePath, index === names.length - 1 ? ctx.sessionId : undefined);
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
     }

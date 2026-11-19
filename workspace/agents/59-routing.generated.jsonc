@@ -484,9 +484,9 @@
           "workspace"
         ],
         "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, ComfyUI workflows, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
-        "sourceHash": "02c5d0c7bfd8aa09",
-        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated); re-labelled 2026-11-11 for the reordered description, verdict unchanged: input stays text, so a flagged turn's step naming it is still redirected to research (a step asking which open model is best for ComfyUI was named for it)",
-        "labeledAt": "2026-11-11"
+        "sourceHash": "e48587b5511a17a4",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated); re-labelled 2026-11-11 for the reordered description, verdict unchanged: input stays text, so a flagged turn's step naming it is still redirected to research (a step asking which open model is best for ComfyUI was named for it); re-labelled 2026-11-19 for the photo-editing wording (an uploaded photo whose cars were to be removed was answered \"no tool can do this\"), verdict unchanged: it already PRODUCEs and EDITS images, and input stays text on purpose (an upload's path is handed to it in the task text; a file_upload input would exempt it from the research redirect)",
+        "labeledAt": "2026-11-19"
       }
     },
     "image_sourcer": {

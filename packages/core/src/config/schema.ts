@@ -285,6 +285,13 @@ export const ModelConfigSchema = z.object({
      *  searched with it (orchestration.routingEnglish). Small and fast: a search waits on it.
      *  Unset, the narration tier does it, and without one the routing tier. */
     translation: z.string().max(200).optional(),
+    /** `distillation`: the model that extracts the facts a specialist shares from each tool result
+     *  it reads (orchestration.distillSharedFacts). It runs beside the specialist's own calls, and
+     *  on the specialist's model it competes with them for the GPU and the prompt cache: in session
+     *  e2b53b6f a researcher waited 76 s of a 271 s run for these extractions, and twice re-read a
+     *  cached prompt they had evicted. Best on a model the specialist does not run on. Unset, the
+     *  routing tier does it, as before. */
+    distillation: z.string().max(200).optional(),
   }).optional(),
 });
 

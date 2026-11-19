@@ -3,6 +3,7 @@ import { setEmbeddingConcurrency, withEmbeddingSlot } from "./embedding-gate.js"
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { currentCallAttribution } from "../runtime/request-context.js";
+import { recordTurnModelCall } from "../agent/turn-metrics.js";
 import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
@@ -1753,6 +1754,13 @@ export class LMStudioProvider {
     // session and model calls can only be tied to a turn by timestamp window — which is
     // exactly how the last audit had to attribute all 435 of them.
     const attribution = currentCallAttribution();
+    // Into the turn's own totals too: the turn report counts every agent's calls, not only the
+    // orchestrator's (turn-metrics.ts recordTurnModelCall).
+    recordTurnModelCall({
+      durationMs: now - input.startedAt,
+      promptTokens: input.usage?.promptTokens ?? null,
+      completionTokens: input.usage?.completionTokens ?? null,
+    });
     logAudit("provider_model_call", {
       ...attribution.data,
       model: input.modelId,
