@@ -276,8 +276,11 @@
               <div class="text-[11px] uppercase tracking-wide text-emerald-300">Latency</div>
               <div class="mt-1 text-gray-300">Turn: {{ formatDuration(ev.data.turnDurationMs) }}</div>
               <div class="text-gray-300">First model response: {{ formatDuration(ev.data.firstModelResponseMs) }}</div>
-              <div class="text-gray-300">Model time: {{ formatDuration(ev.data.llmTimeMs) }}</div>
-              <div class="text-gray-300">Tool time: {{ formatDuration(ev.data.toolExecutionTimeMs) }}</div>
+              <div v-if="typeof ev.data.allModelTimeMs === 'number'" class="text-gray-300" title="Every agent's model calls; calls that ran side by side each count">
+                Model time, all agents: {{ formatDuration(ev.data.allModelTimeMs) }} ({{ Number(ev.data.allModelCalls ?? 0) }} calls)
+              </div>
+              <div class="text-gray-300">Model time, main assistant: {{ formatDuration(ev.data.llmTimeMs) }}</div>
+              <div class="text-gray-300" title="Includes delegated agents' work, their model calls too">Tool time: {{ formatDuration(ev.data.toolExecutionTimeMs) }}</div>
             </div>
             <div :class="['rounded-lg px-3 py-2', performanceDetailCardClass(ev.data)]">
               <div class="text-[11px] uppercase tracking-wide text-gray-500">Prompt Budget</div>

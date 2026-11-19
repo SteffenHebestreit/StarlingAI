@@ -150,6 +150,11 @@
           // lab (2026-11-05). "translate" is Gemma 4 E4B on corsair (8 slots), already resident:
           // 0.3-1.3 s per message, the same German as qwen's.
           "narration": "lmstudio/translate"
+          // Distillation tier ("distillation") — the fact extraction a specialist runs on each tool
+          // result it shares, beside its own calls. Unset: the routing tier (qwen), where it competes
+          // with the specialist for the GPU and its cached prompt (a researcher waited 76 s of 271 s
+          // for it, 2026-11-19). "lmstudio/translate" is the candidate; not set until its extractions
+          // have been compared with qwen's on real pages, since the researcher's answer is built from them.
         }
       }
     },

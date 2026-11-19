@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { inflateSync } from "node:zlib";
 import { Agent as UndiciAgent } from "undici";
+import Jimp from "jimp";
+import { compositeEditOntoOriginal, type EditComposite } from "./image-edit-composite.js";
 import { createConcurrencyGateFamily } from "../runtime/concurrency-gate.js";
 
 export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
@@ -215,6 +217,18 @@ export interface ImageGenerationResult {
   referenceEdit?: boolean;
   /** Set when the render carried a negative prompt at guidance ≤ 1, where it changes nothing. */
   negativePromptIgnored?: boolean;
+  /**
+   * Set when the base was too large for the engines and was scaled down to be edited. `composited`:
+   * the regions the edit changed were laid onto the full-size original, which is the picture
+   * returned (image-edit-composite.ts); otherwise the render is, at the size it was drawn.
+   */
+  editAtReducedSize?: {
+    renderWidth: number;
+    renderHeight: number;
+    changedShare: number;
+    composited: boolean;
+    skipped?: "whole_picture" | "no_change" | "undecodable";
+  };
   mimeType: string;
   extension: string;
   width?: number;
@@ -362,11 +376,14 @@ export async function requestImageGeneration(
   const outOfBounds = imageRequestBoundsError(input);
   if (outOfBounds) throw new Error(`${outOfBounds}. Nothing was rendered.`);
 
-  // Measured only when it can matter: an edit with no size stated renders at its base's size.
-  const baseSize = input.initImage && input.width === undefined && input.height === undefined
-    ? await measureImage(input.initImage)
-    : undefined;
-  const request = resolveImageRequest(config, input, baseSize);
+  // Measured for every edit: one with no size stated renders at its base's size, and a base the
+  // engines do not take at its own size is scaled down before it is sent (sendableEditBase).
+  const baseSize = input.initImage ? await measureImage(input.initImage) : undefined;
+  const resolved = resolveImageRequest(config, input, baseSize);
+  const sendableBase = resolved.initImage && !resolved.mask
+    ? await sendableEditBase(resolved.initImage, baseSize, { width: resolved.width, height: resolved.height })
+    : resolved.initImage;
+  const request = sendableBase === resolved.initImage ? resolved : { ...resolved, initImage: sendableBase ?? resolved.initImage };
   // Before the slot and the backend: a render the server would cut off fails now, not in ten minutes.
   const tooLong = imageRenderLimitError(config, request);
   if (tooLong) throw new ImageRenderTooLongError(tooLong);
@@ -404,8 +421,23 @@ export async function requestImageGeneration(
   // Every adapter reports which tier rendered, not only the OpenAI one. Without this a render
   // routed to the quality tier's own backend came back with no tier at all, so the caller
   // could not say which engine made the picture — and the edit-upgrade notice was lost.
+  // A base scaled down to be edited: the changed regions go back onto the full-size original.
+  const reduced = request.initImage && resolved.initImage && request.initImage !== resolved.initImage
+    ? await restoreEditResolution(resolved.initImage, request.initImage, result.imageBase64, request)
+    : undefined;
+
   return {
     ...result,
+    ...(reduced?.composite
+      ? {
+        imageBase64: reduced.composite.imageBase64,
+        mimeType: reduced.composite.mimeType,
+        extension: reduced.composite.extension,
+        width: reduced.composite.width,
+        height: reduced.composite.height,
+      }
+      : {}),
+    ...(reduced ? { editAtReducedSize: reduced.report } : {}),
     tier: result.tier ?? request.tier,
     ...(request.tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     ...(request.engineArgsRemoved ? { engineArgsRemoved: true } : {}),
@@ -493,12 +525,14 @@ function resolveImageRequest(
   // AN EDIT KEEPS ITS BASE'S SHAPE when no size was asked for. The configured default is a
   // square, so a 1024x768 picture edited without a size came back 1024x1024 — the picture
   // stretched, and a mask painted on the base no longer lined up with the result. A fixed-size
-  // engine still gets its one size, and a base outside the size bounds keeps the default.
+  // engine still gets its one size. A base outside the size bounds — every phone photo (4000x3000
+  // and up) — renders at the default's AREA in its own shape (editSizeForBase), where it used to
+  // take the default square and come back squashed.
   const targetModel = model ?? engineModelForTier(config, tier);
   const editSize = input.initImage && input.width === undefined && input.height === undefined
-    && baseSize && fitsImageSizeBounds(baseSize)
+    && baseSize
     && !(targetModel && config.fixedSizeModels?.includes(targetModel))
-    ? baseSize
+    ? editSizeForBase(baseSize, tierDefaults.width * tierDefaults.height)
     : undefined;
 
   // Settings travel in their own fields and nowhere else; see stripEngineArgs.
@@ -953,6 +987,62 @@ export function fitsImageSizeBounds(size: ImageSize): boolean {
   const fits = (side: number) => Number.isInteger(side)
     && side >= IMAGE_SIZE_BOUNDS.min && side <= IMAGE_SIZE_BOUNDS.max;
   return fits(size.width) && fits(size.height);
+}
+
+/**
+ * The size an edit renders at when none was asked for: the base's own size when it is one the
+ * engines take, otherwise `area` pixels in the base's shape, on the size grid and inside the
+ * bounds. A 4000x3000 photo at the 1024x1024 default's area renders 1184x896.
+ */
+export function editSizeForBase(base: ImageSize, area: number): ImageSize {
+  if (fitsImageSizeBounds(base)) return base;
+  const { min, max, step } = IMAGE_SIZE_BOUNDS;
+  const ratio = base.width / base.height;
+  const snap = (side: number) => Math.min(max, Math.max(min, Math.round(side / step) * step));
+  return { width: snap(Math.sqrt(area * ratio)), height: snap(Math.sqrt(area / ratio)) };
+}
+
+/** The changed regions of a reduced-size edit, laid onto the original; the render alone when that is not possible. */
+async function restoreEditResolution(
+  original: string, sent: string, edited: string, request: { width: number; height: number },
+): Promise<{ composite?: EditComposite; report: NonNullable<ImageGenerationResult["editAtReducedSize"]> }> {
+  const outcome = await compositeEditOntoOriginal(
+    Buffer.from(original, "base64"), Buffer.from(sent, "base64"), Buffer.from(edited, "base64"),
+  ).catch(() => ({ changedShare: 0, skipped: "undecodable" as const, composite: undefined }));
+  return {
+    ...(outcome.composite ? { composite: outcome.composite } : {}),
+    report: {
+      renderWidth: request.width,
+      renderHeight: request.height,
+      changedShare: Math.round(outcome.changedShare * 1000) / 1000,
+      composited: Boolean(outcome.composite),
+      ...(outcome.skipped ? { skipped: outcome.skipped } : {}),
+    },
+  };
+}
+
+/** A base larger than this many pixels is refused rather than decoded (about 64 MP). */
+const MAX_EDIT_BASE_PIXELS = 64_000_000;
+
+/**
+ * The base picture an engine is sent: the picture itself when the engines take its size, otherwise
+ * a PNG scaled down to the render's area in the picture's own shape. A phone photo went across
+ * whole — 16.7 MB of JPEG for a 1184x896 render — and the engine was left to decode and fit a
+ * picture twenty times the size it draws. `undefined` when it does not decode.
+ */
+async function sendableEditBase(base64: string, baseSize: ImageSize | undefined, render: ImageSize): Promise<string | undefined> {
+  if (baseSize && fitsImageSizeBounds(baseSize)) return base64;
+  if (baseSize && baseSize.width * baseSize.height > MAX_EDIT_BASE_PIXELS) {
+    throw new Error(
+      `The base picture is ${baseSize.width}x${baseSize.height}, larger than this client decodes for an edit`
+      + ` (${MAX_EDIT_BASE_PIXELS / 1_000_000} MP). Nothing was rendered.`,
+    );
+  }
+  const picture = await Jimp.read(Buffer.from(base64, "base64")).catch(() => undefined);
+  if (!picture) return undefined;
+  const target = editSizeForBase({ width: picture.getWidth(), height: picture.getHeight() }, render.width * render.height);
+  picture.resize(target.width, target.height, Jimp.RESIZE_BILINEAR);
+  return (await picture.getBufferAsync(Jimp.MIME_PNG)).toString("base64");
 }
 
 /**
@@ -1690,14 +1780,17 @@ async function sendOpenAiImageRequest(
       // 400 "does not accept 'image'. Use /v1/images/edits" — a good error, and one we
       // should never provoke.
       upstreamUrl(config.baseUrl, input.initImage ? "/images/edits" : "/images/generations"),
-      // A MASK IS A FILE PART, so a masked edit cannot go as JSON. Everything else stays on
-      // the JSON path, which is measured-equivalent to multipart for the `image` field and is
-      // the shape already in production — no reason to churn the working case.
+      // EVERY EDIT GOES AS MULTIPART. The image server itself took a JSON edit as well as a form,
+      // and unmasked edits went as JSON for that reason; the proxy in front of it (llama-swap)
+      // now routes /images/edits only from a form's `model` field and answers JSON with 400 "no
+      // model id could be identified: this endpoint expects multipart/form-data" — so every
+      // unmasked edit failed before any engine saw it (session bf079002). A mask was a file part
+      // all along. New pictures stay JSON: /images/generations still routes from a JSON body.
       //
       // `Content-Type` is deliberately omitted for multipart: fetch generates it WITH the
       // boundary, and setting it by hand produces a header with no boundary that the server
       // cannot parse.
-      input.mask
+      input.initImage
         ? { method: "POST", headers: upstreamHeaders(config.apiKey), body: buildEditForm(payload) }
         : {
           method: "POST",

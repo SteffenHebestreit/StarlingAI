@@ -27,6 +27,7 @@
  * 0.3499999940395355 and equality would fail almost every edit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { imageRequestFields } from "./helpers/image-request-fields.js";
 
 import {
   requestImageGeneration,
@@ -59,11 +60,11 @@ const REF = Buffer.from("pretend-png-bytes").toString("base64");
  * requested one, which is why the client compares with a tolerance rather than for equality.
  */
 function stub(usage?: Record<string, unknown> | null) {
-  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const calls: Array<{ url: string; body: Record<string, unknown>; asForm: boolean }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    calls.push({ url, body });
+    const body = await imageRequestFields(init?.body);
+    calls.push({ url, body, asForm: init?.body instanceof FormData });
     if (url.includes("/sdapi/")) {
       return new Response(JSON.stringify({ images: ["QUJD"], info: JSON.stringify({ seed: 7 }) }),
         { headers: { "Content-Type": "application/json" } });
@@ -124,12 +125,17 @@ describe("editing an existing image", () => {
     expect(body["denoising_strength"]).toBeUndefined();
     // And it goes to the EDITS route: /images/generations answers 400 for `image`.
     expect(net.calls[0]!.url).toBe("http://cluster:8080/v1/images/edits");
+    // As a FORM: the proxy in front of the engine routes /images/edits only from a form's
+    // `model` field and answers a JSON edit with 400 before any engine sees it (session bf079002).
+    expect(net.calls[0]!.asForm, "an edit must go as multipart").toBe(true);
   });
 
   it("uses the GENERATIONS route when there is no base image — the control", async () => {
     const net = stub();
     await requestImageGeneration(EDITS, { prompt: "a lighthouse", tier: "quality" });
     expect(net.calls[0]!.url).toBe("http://cluster:8080/v1/images/generations");
+    // A new picture stays JSON: the generations route still routes from a JSON body.
+    expect(net.calls[0]!.asForm).toBe(false);
   });
 
   it("refuses the result when the backend reports it did NOT edit", async () => {

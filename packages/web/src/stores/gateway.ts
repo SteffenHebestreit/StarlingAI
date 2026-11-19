@@ -3,6 +3,7 @@ import { GatewayHttpError } from "@/composables/httpErrors";
 import { defaultGatewayWsUrl, gatewayRestBaseUrl, normalizeGatewayWsUrl } from "@/composables/gatewayUrl";
 import { forbiddenReason } from "@/composables/rpcErrors";
 import { readAllowedRpcMethods, rpcMethodAllowed } from "@/composables/rpcAccess";
+import { turnModelTotals } from "@/composables/turnPerf";
 import { browserLanguage, chatText } from "@/composables/chatText";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
@@ -43,11 +44,23 @@ export interface TurnUsage {
 
 export interface TurnPerf {
   turnDurationMs: number;
+  /** The main assistant's own model calls and their time: not those of the agents it delegated to. */
   llmCalls: number;
   llmTimeMs: number;
   toolIterations: number;
   finishReason: string;
+  /**
+   * Every model call made in the turn, by any agent (delegated specialists, their evidence
+   * distillation, the routing and narration calls), and their tokens. A sum over calls: calls that
+   * ran side by side each count, so the time can exceed the turn's duration. Absent from a gateway
+   * that does not report them.
+   */
+  allModelCalls?: number;
+  allModelTimeMs?: number;
+  allPromptTokens?: number;
+  allCompletionTokens?: number;
 }
+
 
 export interface InterventionAction {
   kind: "stop_turn" | "new_session" | "request_approval";
@@ -3549,6 +3562,7 @@ export const useGatewayStore = defineStore("gateway", () => {
             llmTimeMs: Number(rawPerf["llmTimeMs"] ?? 0),
             toolIterations: Number(rawPerf["toolIterations"] ?? 0),
             finishReason: String(rawPerf["finishReason"] ?? ""),
+            ...turnModelTotals(rawPerf),
           } : undefined,
           reasoning: streamingReasoning.value.trim() || undefined,
           subAgentReasoning: streamingSubAgentReasoning.value.length > 0

@@ -29,6 +29,7 @@ import {
   requestImageGeneration,
   resolveNamedImageEngine,
   type ImageGenerationRequest,
+  type ImageGenerationResult,
   type ImageGenerationTier,
 } from "../multimodal/image-generation.js";
 import {
@@ -55,9 +56,11 @@ import {
 import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
 import { readAllFacts, writeSharedFact } from "../swarm/memory.js";
 import { getSessionRecord } from "../agent/session.js";
+import { attachmentNamed, attachmentsHint } from "../agent/conversation-attachments.js";
 import { holdTurnClocks } from "../agent/user-input-broker.js";
 import { DECLINED_BY_USER_METADATA_KEY } from "../agent/user-input.js";
 import { currentCallAttribution, currentRequestContext } from "../runtime/request-context.js";
+import { recordTurnModelCall } from "../agent/turn-metrics.js";
 import { logAudit } from "../audit/logger.js";
 import { readServerTimings } from "../providers/lmstudio.js";
 import type { MultimodalImageGenerationConfig } from "../config/schemas/multimodal.js";
@@ -132,7 +135,7 @@ registerTool({
     if (!path) return fail("path is required");
 
     try {
-      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);
       const body = await convertFileToMarkdown(file);
       const markdown = String(body["markdown"] ?? "").trim();
       if (!markdown) return fail(`No markdown content was returned for ${path}`);
@@ -171,7 +174,7 @@ registerTool({
     if (!path) return fail("path is required");
 
     try {
-      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);
       const config = getConfig().multimodal.stt;
       if (!multimodalServiceConfigured(config.baseUrl)) {
         return fail("STT is disabled: configure multimodal.stt.baseUrl to enable transcription.");
@@ -325,7 +328,7 @@ registerTool({
         speed: typeof args["speed"] === "number" ? args["speed"] : 1,
         speaker,
         savedVoiceId,
-        audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath, ctx.workspacePath) : undefined,
+        audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath, ctx.workspacePath, ctx.sessionId) : undefined,
         referenceText,
         saveVoiceAs: explicitSaveVoiceAs,
         allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,
@@ -384,7 +387,7 @@ registerTool({
     if (!path) return fail("path is required");
 
     try {
-      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const file = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);
       if (!file.contentType.startsWith("image/")) {
         return fail(`Unsupported image type for ${path}`);
       }
@@ -458,7 +461,9 @@ registerTool({
   name: "transform_image",
   description:
     "Apply exact, deterministic edits to an existing image in the workspace: sharpen, soften,"
-    + " resize, crop, rotate, flip, brightness, contrast, grayscale, normalize. Runs locally in"
+    + " resize, crop, rotate, flip, brightness, contrast, grayscale, normalize. It cannot remove or add"
+    + " anything IN the picture (objects, people, a background): that is generate_image's edit with"
+    + " baseImage. Runs locally in"
     + " milliseconds and costs the cluster nothing — it does NOT re-generate the picture, so"
     + " everything you are not changing stays exactly as it was. Use this, never the image model,"
     + " when the request is about the image as a picture rather than about its content.",
@@ -466,7 +471,7 @@ registerTool({
     "Sharpen, soften, blur, resize, scale, crop, trim, rotate, flip, brighten, darken, contrast,"
     + " grayscale, black and white, normalize an existing image. Bild schärfen, weichzeichnen,"
     + " skalieren, zuschneiden, drehen, spiegeln, heller, dunkler, Kontrast, Graustufen."
-    + " Post-processing, retouch, adjust a picture without regenerating it.",
+    + " Post-processing: adjust a whole picture without regenerating it.",
   parameters: {
     type: "object",
     properties: {
@@ -499,7 +504,7 @@ registerTool({
     }
 
     try {
-      const source = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const source = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);
       const result = await transformImage(Buffer.from(source.bytes), operations);
 
       const requested = stringArg(args["outputPath"]);
@@ -590,7 +595,12 @@ registerTool({
   get description() {
     return GENERATE_IMAGE_DESCRIPTION + describeImageEngines();
   },
-  embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
+  // English only, as every catalog entry is (the request is rendered into English before a catalog
+  // search, agent/routing-english.ts). Editing is named here as well as generating: it read only
+  // "generate ... from a text prompt", and a search for removing the cars from an uploaded photo
+  // ranked transform_image (crop, rotate) first, so the orchestrator told the user no tool could
+  // edit a photo.
+  embeddingDescription: "Generate, create or make an image, picture, photo or illustration from a text prompt, or EDIT an existing image or photo, an uploaded one included: remove or add objects or people, inpaint, retouch, replace the background or the sky, recolour, keeping the rest of the picture. AI image generation and image-to-image editing.",
   parameters: {
     type: "object",
     properties: {
@@ -822,7 +832,7 @@ registerTool({
       const baseImagePath = stringArg(args["baseImage"]);
       if (baseImagePath) {
         try {
-          baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath);
+          baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath, ctx.sessionId);
         } catch (error) {
           return fail(
             `Could not read baseImage "${baseImagePath}": ${error instanceof Error ? error.message : String(error)}`,
@@ -834,7 +844,7 @@ registerTool({
       const maskPath = stringArg(args["mask"]);
       if (maskPath) {
         try {
-          maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath);
+          maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath, ctx.sessionId);
         } catch (error) {
           return fail(
             `Could not read mask "${maskPath}": ${error instanceof Error ? error.message : String(error)}`,
@@ -989,6 +999,7 @@ registerTool({
             ? ` — NOTE: \`strength\` did not apply: ${engine ?? "this engine"} edits by instruction, so the`
               + " prompt alone decided what changed."
             : "")
+          + describeReducedSizeEdit(result)
           + (result.engineArgsRemoved
             ? " — NOTE: an <sd_cpp_extra_args> block was removed from the prompt before it was sent; settings"
               + " go in this tool's own parameters, and the ones above are what ran."
@@ -1017,6 +1028,7 @@ registerTool({
           ...(engine ? { engine } : {}),
           elapsedMs: result.elapsedMs,
           ...(result.deviceWaitMs ? { deviceWaitMs: result.deviceWaitMs } : {}),
+          ...(result.editAtReducedSize ? { editAtReducedSize: result.editAtReducedSize } : {}),
           ...(settingsStep.metadata ? { settings: settingsStep.metadata } : {}),
         },
       };
@@ -1035,6 +1047,31 @@ registerTool({
     }
   },
 });
+
+/**
+ * What an edit of a picture too large for the engines did to its resolution, said in the output:
+ * the agent reads nothing else, and "the photo is now 1184x896" is something the person must hear,
+ * as is an edit that changed nothing.
+ */
+function describeReducedSizeEdit(result: ImageGenerationResult): string {
+  const reduced = result.editAtReducedSize;
+  if (!reduced) return "";
+  const drawn = `${reduced.renderWidth}x${reduced.renderHeight}`;
+  if (reduced.composited) {
+    return ` — The picture was edited at ${drawn}, the size the engines draw, and the regions the edit changed`
+      + ` (${Math.max(1, Math.round(reduced.changedShare * 100))}% of the picture) were laid back onto the original at`
+      + ` ${result.width}x${result.height}: everything else is the original's own pixels, the changed regions are a little softer.`;
+  }
+  if (reduced.skipped === "no_change") {
+    return ` — NOTE: the edit changed nothing visible in the picture. Do not report the change as made; say it did not take.`;
+  }
+  if (reduced.skipped === "whole_picture") {
+    return ` — NOTE: the picture was edited at ${drawn}, the size the engines draw, and the change covers most of it,`
+      + " so the result is at that size, smaller than the original. Say so.";
+  }
+  return ` — NOTE: the picture was edited at ${drawn}, the size the engines draw, and could not be laid back onto the`
+    + " original, so the result is at that size, smaller than the original. Say so.";
+}
 
 /** What the settings step decided: the request to render, and what to tell the agent about it. */
 interface ImageSettingsStep {
@@ -1555,7 +1592,37 @@ async function withInlineSnapshot(output: string): Promise<{ output: string; sna
   return { output: output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)"), snapshot };
 }
 
-export async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
+/**
+ * A workspace file's bytes. With `sessionId`, a path that misses is tried once more as the name of
+ * a file the person attached in this conversation: the upload route stores a chat attachment as
+ * `uploads/<chat>/<stamp>-<name>`, and an agent told only the name looked for it under generated/
+ * and at the workspace root, never found it, and drew a new picture in its place (session
+ * bf079002). When that misses too, the error lists the attachments by path. The retry goes through
+ * the same confinement guard as any other path.
+ */
+export async function readWorkspaceBinaryFile(path: string, workspacePath: string, sessionId?: string): Promise<WorkspaceBinaryFile> {
+  try {
+    return await readWorkspaceBinaryFileAt(path, workspacePath);
+  } catch (error) {
+    if (!sessionId) throw error;
+    const attached = attachmentNamed(sessionId, path);
+    if (attached && attached.relativePath !== path.trim().replace(/\\/g, "/")) {
+      try {
+        return await readWorkspaceBinaryFileAt(attached.relativePath, workspacePath);
+      } catch {
+        // Fall through to the caller's own error, which names the path it asked for.
+      }
+    }
+    const hint = attachmentsHint(sessionId);
+    if (!hint) throw error;
+    // The code stays: callers that try several places in turn continue on ENOENT.
+    throw Object.assign(new Error(`${error instanceof Error ? error.message : String(error)}.${hint}`), {
+      code: (error as NodeJS.ErrnoException)?.code,
+    });
+  }
+}
+
+async function readWorkspaceBinaryFileAt(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
   const resolved = resolveWorkspacePath(path, workspacePath);
   const describe = (bytes: Buffer): WorkspaceBinaryFile => ({
     resolvedPath: resolved.resolved,
@@ -1789,6 +1856,12 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
     const count = (value: unknown): number | null => (typeof value === "number" ? value : null);
     const details = usage?.["completion_tokens_details"] as Record<string, unknown> | undefined;
     const timings = readServerTimings(result?.timings);
+    // Into the turn's own totals too (turn-metrics.ts recordTurnModelCall).
+    recordTurnModelCall({
+      durationMs: Date.now() - startedAt,
+      promptTokens: count(usage?.["prompt_tokens"]),
+      completionTokens: count(usage?.["completion_tokens"]),
+    });
     logAudit("provider_model_call", {
       ...(attribution.data.agentName ? { requestedBy: attribution.data.agentName } : {}),
       agentName: "analyze_image",

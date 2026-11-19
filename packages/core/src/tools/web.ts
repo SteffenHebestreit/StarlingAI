@@ -421,47 +421,50 @@ registerTool({
       let renderedEmpty = false;
       if (playwrightAvailable) {
         try {
-          // The browser follows redirects, runs the page's scripts and may be answered unlike the
-          // direct request, and whatever page it ended on came back as this URL's content. That
-          // page is now checked, on arrival and again once read, before anything from it is used.
-          // This keeps the page out of the answer; it cannot take back the request the browser sent.
-          const arrival = await refusedBrowserPage(reportedPageUrls(await callPlaywrightTool("browser_navigate", { url })));
-          if (arrival) return await refuseBrowserLanding(url, arrival);
-          let rendered: { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null };
-          let pageReport: string;
-          try {
-            // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
-            // rejects as a missing `function`, so this fast path never ran and every page came
-            // back as a converted accessibility snapshot instead of its text.
-            pageReport = await callPlaywrightTool("browser_evaluate", { function: PAGE_TEXT_AND_LINKS });
-            rendered = parseRenderedPage(evaluateResultText(pageReport));
-          } catch {
-            // Fall back to snapshot and convert to readable text
-            log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
-            pageReport = await callPlaywrightTool("browser_snapshot", {});
-            rendered = { text: snapshotToReadableText(pageReport), ...snapshotLinks(pageReport, url) };
-          }
-          const landing = await refusedBrowserPage([...reportedPageUrls(pageReport), ...(rendered.pageUrl ? [rendered.pageUrl] : [])]);
-          if (landing) return await refuseBrowserLanding(url, landing);
-          // The page can frame a private host, and the snapshot carries the frame's content. The
-          // page function lists the frames it found; a snapshot that shows one has them read.
-          const frames = rendered.frames !== undefined ? rendered.frames : showsFrames(pageReport) ? (await readPageAddresses()).frames : [];
-          const framed = await refusedFrameUrls(frames);
-          if (framed) return await refuseBrowserLanding(url, framed);
-          // Emptiness is the page's text, never the envelope or the links around it.
-          if (!rendered.text.trim()) {
+          // One page at a time: the browser is shared, and two fetches that each navigated and then
+          // read would read each other's page (withSharedBrowserPage).
+          const browserOutcome = await withSharedBrowserPage(async (): Promise<ToolResult | "empty"> => {
+            // The browser follows redirects, runs the page's scripts and may be answered unlike the
+            // direct request, and whatever page it ended on came back as this URL's content. That
+            // page is now checked, on arrival and again once read, before anything from it is used.
+            // This keeps the page out of the answer; it cannot take back the request the browser sent.
+            const arrival = await refusedBrowserPage(reportedPageUrls(await callPlaywrightTool("browser_navigate", { url })));
+            if (arrival) return await refuseBrowserLanding(url, arrival);
+            let rendered: { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null };
+            let pageReport: string;
+            try {
+              // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
+              // rejects as a missing `function`, so this fast path never ran and every page came
+              // back as a converted accessibility snapshot instead of its text.
+              pageReport = await callPlaywrightTool("browser_evaluate", { function: PAGE_TEXT_AND_LINKS });
+              rendered = parseRenderedPage(evaluateResultText(pageReport));
+            } catch {
+              // Fall back to snapshot and convert to readable text
+              log.warn({ url }, "web_fetch: browser_evaluate unavailable, converting snapshot to text");
+              pageReport = await callPlaywrightTool("browser_snapshot", {});
+              rendered = { text: snapshotToReadableText(pageReport), ...snapshotLinks(pageReport, url) };
+            }
+            const landing = await refusedBrowserPage([...reportedPageUrls(pageReport), ...(rendered.pageUrl ? [rendered.pageUrl] : [])]);
+            if (landing) return await refuseBrowserLanding(url, landing);
+            // The page can frame a private host, and the snapshot carries the frame's content. The
+            // page function lists the frames it found; a snapshot that shows one has them read.
+            const frames = rendered.frames !== undefined ? rendered.frames : showsFrames(pageReport) ? (await readPageAddresses()).frames : [];
+            const framed = await refusedFrameUrls(frames);
+            if (framed) return await refuseBrowserLanding(url, framed);
+            // Emptiness is the page's text, never the envelope or the links around it.
             // An empty render is not the page's content. It was returned as a successful fetch
             // of nothing; now the last-resort direct fetch gets its turn, and if that is empty
             // too the call fails and says both were.
-            renderedEmpty = true;
-          } else {
+            if (!rendered.text.trim()) return "empty";
             const { text, linkCount } = withLinks(rendered.text, rendered.links, rendered.pageUrl ?? url, maxLength);
             return {
               success: true,
               output: `**Content from:** ${url}${directNote ? ` (browser-rendered; ${directNote})` : ""}\n\n${text}${shareSuffix}`,
               metadata: { url, contentLength: text.length, contentType: contentType || "text/html", fetchMethod: "playwright", linkCount, ...(directStatus !== null ? { httpStatus: directStatus } : {}) },
             };
-          }
+          });
+          if (browserOutcome !== "empty") return browserOutcome;
+          renderedEmpty = true;
         } catch (playwrightErr) {
           log.warn({ err: playwrightErr, url }, "web_fetch Playwright failed");
         }
@@ -1776,6 +1779,27 @@ async function searchSearxng(query: string, maxResults: number, baseUrl: string,
 
 // ─── Playwright browser-based search (DuckDuckGo via rendered browser) ───────
 
+/**
+ * The browser behind the playwright connection is ONE page, shared by every caller in the process.
+ * web_fetch's fallback and the playwright search backend each navigate and then read what the page
+ * shows; two of them at once (a researcher's fetches run side by side, agents/sub-agent.ts
+ * prefetchParallelToolCalls) would each read whichever page the other navigated to last. They take
+ * the page one at a time here. This orders only these two paths: the browser agent's own steps,
+ * the login helpers and the accessibility check still drive the page directly.
+ */
+let sharedBrowserPageTail: Promise<void> = Promise.resolve();
+export async function withSharedBrowserPage<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = sharedBrowserPageTail;
+  let release!: () => void;
+  sharedBrowserPageTail = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    await previous;
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 async function searchPlaywright(query: string, maxResults: number, _timeoutMs: number): Promise<{
   results: SearchResult[];
   rewrittenQuery: string;
@@ -1784,8 +1808,11 @@ async function searchPlaywright(query: string, maxResults: number, _timeoutMs: n
   const rewrittenQuery = expandSearchQuery(query);
   const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(rewrittenQuery)}&kl=wt-wt`;
 
-  await callPlaywrightTool("browser_navigate", { url: searchUrl });
-  const snapshot = await callPlaywrightTool("browser_snapshot", {});
+  // One page at a time, as web_fetch's browser fallback (withSharedBrowserPage).
+  const snapshot = await withSharedBrowserPage(async () => {
+    await callPlaywrightTool("browser_navigate", { url: searchUrl });
+    return callPlaywrightTool("browser_snapshot", {});
+  });
 
   const rawResults = parsePlaywrightSearchSnapshot(snapshot);
   const rankedResults = rankSearchResults(rewrittenQuery, rawResults, maxResults);

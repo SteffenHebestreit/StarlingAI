@@ -37,7 +37,7 @@ import { failedWriteTarget } from "./unwritten-file-claims.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, toolCallIdentity, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import type { Identity } from "../runtime/accounts.js";
-import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
+import { getToolTier, isToolAllowed, requiresApproval, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addFigureKeys,
   addArgumentFigureKeys,
@@ -85,6 +85,7 @@ import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
 import { agentRunRefusal, runCaller } from "./full-scope-agent-floor.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
+import { attachedFilesBlock } from "./conversation-attachments.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
 import { agentCfgDomainTools, agentCfgGathersDirectly, agentCfgHasNoUsableTools, isBrowserTabViewToolName, taskNamesWebAddress } from "../tools/agent-routing.js";
@@ -1057,6 +1058,68 @@ export const DISTILL_CALL_DEADLINE_MS = 60_000;
  * orchestration.qaVerdictReasoning can switch back to deliberating); nothing here touches them.
  */
 export const SYNTHESIS_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+
+/**
+ * The tools whose calls in one response may run side by side: reads over the network that change
+ * nothing in the workspace, the session or the run's own records. The tool loop handles a response's
+ * calls one by one, each after the last one's result was processed, so a researcher's three searches
+ * took the sum of their times, and a page that needed the browser held up the plain fetches after it
+ * (session e2b53b6f: 3 searches 2.4 s, 2 fetches 23.5 s, 3 fetches 3.9 s, all in sequence). Their
+ * results are still processed in the response's order, by the same loop, with every guard it runs.
+ * The browser these tools fall back to is shared and is taken one page at a time
+ * (tools/web.ts withSharedBrowserPage).
+ */
+export const PARALLEL_SAFE_TOOL_NAMES: ReadonlySet<string> = new Set(["web_search", "web_fetch", "url_inspect"]);
+
+/** A call started ahead of the tool loop, and the name and arguments it was started with. */
+export interface PrefetchedToolCall {
+  name: string;
+  argsJson: string;
+  result: Promise<ToolResult>;
+}
+
+/**
+ * Starts the response's parallel-safe calls at once, when there are at least two of them, and
+ * returns them by call id. `mayStart` is the run's own say on each call (its tool allow-list and
+ * blocks, the security policy, approval); a call it declines runs in the loop as before.
+ *
+ * The loop still decides each call: it takes the started result only when the call reaches the
+ * point of execution with the same name and arguments (prefetchedResultFor). A call the loop answers
+ * otherwise (a cache, a cap, a block it raises meanwhile, a rerouted name) leaves its started result
+ * unused: a read whose result nobody sees. A rejection is held, never unhandled.
+ */
+export function prefetchParallelToolCalls(
+  calls: ReadonlyArray<{ id?: string; name: string; arguments: Record<string, unknown> }>,
+  mayStart: (call: { name: string; arguments: Record<string, unknown> }) => boolean,
+  run: (call: { id?: string; name: string; arguments: Record<string, unknown> }) => Promise<ToolResult>,
+): Map<string, PrefetchedToolCall> {
+  const started = new Map<string, PrefetchedToolCall>();
+  const eligible = calls.filter((call) => call.id && PARALLEL_SAFE_TOOL_NAMES.has(call.name) && mayStart(call));
+  if (eligible.length < 2) return started;
+  for (const call of eligible) {
+    const result = run(call);
+    result.catch(() => undefined);
+    started.set(call.id!, { name: call.name, argsJson: JSON.stringify(call.arguments ?? {}), result });
+  }
+  return started;
+}
+
+/**
+ * The started result for this call, when it was started with the name and arguments the loop is
+ * about to run it with; undefined otherwise. Either way the entry is taken out of `started`, so what
+ * is left after the loop is what it did not use.
+ */
+export function prefetchedResultFor(
+  started: Map<string, PrefetchedToolCall>,
+  call: { id?: string; name: string },
+  executedArgs: Record<string, unknown>,
+): Promise<ToolResult> | undefined {
+  if (!call.id) return undefined;
+  const entry = started.get(call.id);
+  if (!entry) return undefined;
+  started.delete(call.id);
+  return entry.name === call.name && entry.argsJson === JSON.stringify(executedArgs ?? {}) ? entry.result : undefined;
+}
 
 export async function distillFindingForSharedFacts(params: {
   objective: string;
@@ -2573,6 +2636,8 @@ function buildSubAgentToolAuditPayload(params: {
   successOverride?: boolean;
   cachedResult?: boolean;
   skippedReason?: string;
+  /** The call ran side by side with the response's other network reads (prefetchParallelToolCalls). */
+  ranAlongside?: boolean;
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     agentName: params.agentName,
@@ -2585,6 +2650,7 @@ function buildSubAgentToolAuditPayload(params: {
   if (params.args && Object.keys(params.args).length > 0) payload["args"] = params.args;
   if (params.cachedResult) payload["cachedResult"] = true;
   if (params.skippedReason) payload["skippedReason"] = params.skippedReason;
+  if (params.ranAlongside) payload["ranAlongside"] = true;
 
   if (params.phase === "done") {
     const success = params.result ? params.result.success : (params.successOverride ?? !params.errorText);
@@ -3145,7 +3211,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     : resolvedTurnTimeoutMs;
   const turnTimeoutMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0 ? effectiveTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
-  const userWordsBlock = userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, sanitizedTask, opts.context);
+  const userWordsBlock = userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, sanitizedTask, opts.context)
+    // The paths of the person's attachments: the task names a picture, the path is only on the
+    // message (agent/conversation-attachments.ts). Kept off an A2A bridge, like the words.
+    + (agentCfg.domain === "a2a" ? "" : attachedFilesBlock(opts.parentSessionId, `${sanitizedTask}\n${opts.context ?? ""}`));
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
   // Fix 4: detect when this task was routed via the no-specialist-match
   // discovery fallback. The taskTitle marker is set by both the runtime-side
@@ -4643,7 +4712,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       // went out with thinking on. Thinking off the same pass takes about a second.
       // This fallback carries the routing controls so a deployment with NO routing
       // tier configured does not repeat the 193 s.
-      provider: routingTierProvider(),
+      //
+      // A distillation tier comes first when one is set (agents.defaults.model.tiers.distillation):
+      // these calls run beside this agent's own, and on its model they compete with them for the
+      // GPU and evict its cached prompt (session e2b53b6f).
+      provider: getChatProviderForTier("distillation") ?? routingTierProvider(),
     };
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
@@ -7462,6 +7535,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       const maxDelegationDepth = effectiveOrchestration().maxDelegationDepth ?? 3;
       const delegationDepthExceeded = currentDelegationDepth >= maxDelegationDepth;
 
+      // This response's network reads run side by side; the loop below still takes each result in
+      // order, through every guard (prefetchParallelToolCalls).
+      const prefetchedCalls = signal?.aborted ? new Map<string, PrefetchedToolCall>() : prefetchParallelToolCalls(
+        response.tool_calls,
+        (call) => !blockedToolReasons.has(call.name)
+          && (!effectiveToolNames || effectiveToolNames.includes(call.name))
+          && isToolAllowed(call.name)
+          && !requiresApproval(call.name),
+        (call) => executeTool(call.name, call.arguments, toolContext, { toolCallId: call.id }),
+      );
+
       for (const [toolCallIndex, tc] of response.tool_calls.entries()) {
         if (signal?.aborted) break;
         if (requiredResearchFallbackRoute && enforceSubAgentRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, subSessionId, opts.agentName)) {
@@ -8077,7 +8161,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
             }, { sessionId: subSessionId, severity: "warn" });
           }
         }
-        const result = await executeTool(tc.name, executedArgs, toolContext, { toolCallId: tc.id });
+        const startedAhead = prefetchedResultFor(prefetchedCalls, tc, executedArgs);
+        const result = startedAhead ? await startedAhead : await executeTool(tc.name, executedArgs, toolContext, { toolCallId: tc.id });
         executedToolThisIteration = true;
         // An execution is a sandbox call whose result says the program ran (programOutputChars,
         // tools/shell.ts). A refused approval or a rejected argument never sets the field, and a
@@ -8136,6 +8221,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           args: tc.arguments,
           toolCallId: tc.id,
           result,
+          ...(startedAhead ? { ranAlongside: true } : {}),
         });
         // Recorded only here, where the call RAN. The branches above answer a call without running
         // it, and an approval that was not granted is a refusal, not a failure of the work. A call
@@ -8703,6 +8789,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           replaysSinceWrite.set(idemKey, { calls: 1, answers: [executedAnswer] });
         }
       }
+
+      // A read started ahead that the loop answered another way still went out: on the record.
+      for (const [toolCallId, unused] of prefetchedCalls) {
+        logAudit("sub_agent_tool_call", {
+          agentName: opts.agentName,
+          tool: unused.name,
+          phase: "prefetch_unused",
+          toolCallId,
+        }, { sessionId: subSessionId, severity: "info" });
+      }
+      prefetchedCalls.clear();
 
       // EVERY CALL THAT ANNOUNCED A START ANNOUNCES AN END.
       //

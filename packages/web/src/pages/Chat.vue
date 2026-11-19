@@ -3370,7 +3370,13 @@ async function sendMessage() {
           ...(kept ? { relativePath: kept.relativePath } : {}),
         });
       }
-      imageContext = pendingImages.map((p, i) => `Image analysis (${p.filename}):\n\n${analyses[i]}`).join("\n\n");
+      // With the path the picture was kept at: a request to change the picture ("remove the cars in
+      // the background") needs the file itself, and the turn only knew its name and description, so
+      // no specialist could be handed it (session bf079002).
+      imageContext = pendingImages.map((p, i) => {
+        const keptAt = stored[i]?.relativePath;
+        return `Image analysis (${p.filename}${keptAt ? `, workspace path ${keptAt}` : ""}):\n\n${analyses[i]}`;
+      }).join("\n\n");
     }
 
     pendingUserMessageId = await gateway.appendPendingUserMessage(displayContent, attachments);

@@ -290,6 +290,41 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     expect(ordinary.userTurn).toContain(GERMAN);
   });
 
+  // THE PATHS OF THE PERSON'S ATTACHMENTS. The task named a photo, the path was only on the chat
+  // message, and image_creator drew new cars instead of editing it (session bf079002).
+  it("delivers the paths of the files the user attached after the task, and leaves the head byte-identical", async () => {
+    const dir = makeWorkspace();
+    const chat = `chat-${Math.random().toString(36).slice(2)}`;
+    const upload = `uploads/${chat}/1760000000001-IMG_0042.jpg`;
+    const runInChat = async (parentSessionId: string): Promise<Captured> => {
+      process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
+      vi.resetModules();
+      (await import("../config/loader.js")).resetConfigForTests();
+      (await import("../agent/session.js")).createSession({ sessionId: chat, channel: "test", workspacePath: dir }).addMessage({
+        role: "user", content: "Kannst du die Autos am Rand entfernen?",
+        metadata: { attachments: [{ filename: "IMG_0042.jpg", relativePath: upload }] },
+      });
+      let head = "";
+      let userTurn = "";
+      completeMock.mockImplementation((messages: Array<{ role: string; content: string }>) => {
+        head = messages.find((m) => m.role === "system")?.content ?? "";
+        userTurn = messages.find((m) => m.role === "user")?.content ?? "";
+        return { content: "Done.", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" };
+      });
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      await runSubAgentWithStats({ agentName: AGENT, task: TASK_NGINX, parentSessionId, workspacePath: dir });
+      return { head, userTurn, tail: "", rerankKey: undefined, promptChars: 0 };
+    };
+
+    const inChat = await runInChat(chat);
+    const elsewhere = await runInChat(`parent-${Math.random().toString(36).slice(2)}`);
+
+    expect(inChat.userTurn).toContain(`IMG_0042.jpg: ${upload}`);
+    expect(inChat.userTurn.indexOf(upload)).toBeGreaterThan(inChat.userTurn.indexOf(TASK_NGINX));
+    expect(inChat.head).toBe(elsewhere.head);
+    expect(elsewhere.userTurn).not.toContain("FILES THE USER ATTACHED");
+  });
+
   it("hands the user's words to the tools the specialist calls, so its own delegations carry them", async () => {
     // A coordinator's specialists must get the user's words, not the coordinator's paraphrase.
     // Its delegate tools read them from the ToolContext they are called with, so that is what

@@ -43,7 +43,7 @@ import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { buildMemoryCapsule } from "./receptionist.js";
-import { startDiscoveryPrefetch, turnContextInjected } from "./turn-setup.js";
+import { catalogSearchText, startDiscoveryPrefetch, turnContextInjected } from "./turn-setup.js";
 import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
 import { AGENT_DISCOVERY_TOOL_NAMES } from "./delegation-response-collapse.js";
 import { loadTurnPlan } from "./turn-plan.js";
@@ -326,7 +326,11 @@ export async function assembleTurnSystemMessages(
     const discoveryPrefetchPromise: Promise<string> =
       iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch
         ? (params.startedDiscoveryPrefetch
-          ?? startDiscoveryPrefetch({ userMessage, sessionId: session.id, ...(allowedAgents ? { allowedAgents } : {}) }))
+          ?? startDiscoveryPrefetch({
+            userMessage: catalogSearchText(userMessage, currentRequestContext()?.userWords),
+            sessionId: session.id,
+            ...(allowedAgents ? { allowedAgents } : {}),
+          }))
         : Promise.resolve("");
     // Proactive user-profile prefetch (orchestration.userProfilePrefetch, default-off,
     // eval-gated): on a userOwnFacts turn (a question about the user's OWN background /

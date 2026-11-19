@@ -21,6 +21,8 @@ const prefetchStarted = vi.hoisted(() => {
   return state;
 });
 const prefetchCalls = vi.hoisted(() => ({ count: 0 }));
+/** What each prefetch searched the catalogs with. */
+const prefetchQueries = vi.hoisted(() => [] as string[]);
 const streamMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../providers/index.js", () => {
@@ -52,8 +54,9 @@ vi.mock("../providers/index.js", () => {
 
 vi.mock("../agent/discovery-prefetch.js", () => ({
   formatDiscoveryCapsule: () => "",
-  prefetchCapabilityCandidates: async () => {
+  prefetchCapabilityCandidates: async (query: string) => {
     prefetchCalls.count += 1;
+    prefetchQueries.push(query);
     events.push("prefetch_started");
     prefetchStarted.resolve();
     return "[CAPABILITY CANDIDATES — discovered up-front for this turn]\n- researcher";
@@ -100,6 +103,7 @@ describe("the discovery prefetch is started beside the source judge, not after i
     streamMock.mockReset();
     events.length = 0;
     prefetchCalls.count = 0;
+    prefetchQueries.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   });
@@ -124,5 +128,43 @@ describe("the discovery prefetch is started beside the source judge, not after i
     const firstPrompt = ((streamMock.mock.calls[0]?.[0] ?? []) as Array<{ content?: unknown }>)
       .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
     expect(firstPrompt).toContain("[CAPABILITY CANDIDATES");
+  });
+
+  /**
+   * The web chat puts an attachment's analysis in front of the typed words. Searched as a whole, the
+   * analysis was the query: a photo's description found no agent for "remove the cars in the
+   * background", and the turn answered that no tool could edit a photo (session bf079002).
+   */
+  it("searches the catalogs with the person's typed words, not an attachment's analysis in front of them", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => (async function* () {
+      yield { type: "text_delta", content: "Here is the answer." };
+      yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+    })());
+    const analysis = "Image analysis (photo.jpg, workspace path uploads/s1/photo.jpg):\n\nA harbour quay at dusk; two cars parked by the water.";
+    const typed = "Remove the cars in the background.";
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-prefetch-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: `${analysis}\n\n${typed}`, userWords: typed });
+
+    expect(prefetchQueries).toEqual([typed]);
+    // The model still reads the whole message, the analysis and the photo's path included.
+    const firstPrompt = ((streamMock.mock.calls[0]?.[0] ?? []) as Array<{ content?: unknown }>)
+      .map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+    expect(firstPrompt).toContain("workspace path uploads/s1/photo.jpg");
+    expect(firstPrompt).toContain("two cars parked by the water");
+  });
+
+  it("searches with the whole message when no typed words are known", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => (async function* () {
+      yield { type: "text_delta", content: "Here is the answer." };
+      yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+    })());
+
+    const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-prefetch-ws-")), systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: "which recorder should I buy for interviews?" });
+
+    expect(prefetchQueries).toEqual(["which recorder should I buy for interviews?"]);
   });
 });

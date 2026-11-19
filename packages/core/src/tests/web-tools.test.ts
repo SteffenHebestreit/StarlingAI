@@ -358,6 +358,46 @@ describe("web_fetch through the browser (Playwright MCP 1.61)", () => {
     expect(result.output, "fell back to the accessibility tree").not.toContain("Fallback tree");
     expect(result.metadata?.["fetchMethod"]).toBe("playwright");
   });
+
+  // The browser is one shared page. A researcher's fetches now run side by side
+  // (agents/sub-agent.ts prefetchParallelToolCalls), and two fallbacks that each navigated and then
+  // read would read whichever page the other navigated to last (tools/web.ts withSharedBrowserPage).
+  it("reads two pages through the browser at once, each with its own text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html><body><div id=app></div></body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    })));
+    let current = "about:blank";
+    const order: string[] = [];
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      if (input.name === "browser_navigate") {
+        current = String(input.arguments["url"]);
+        order.push(`navigate ${current}`);
+        return { content: [{ type: "text", text: "" }] };
+      }
+      if (input.name === "browser_evaluate") {
+        order.push(`read ${current}`);
+        return { content: [{ type: "text", text: `### Result\n"Page text of ${current}"` }] };
+      }
+      return { content: [{ type: "text", text: "" }] };
+    });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const { getTool } = await import("../tools/registry.js");
+    const fetchPage = (url: string) => getTool("web_fetch")!.execute({ url }, { sessionId: "session-web-fetch-shared-page", workspacePath: "/workspace" });
+    const [first, second] = await Promise.all([fetchPage("https://example.com/first"), fetchPage("https://example.com/second")]);
+
+    expect(first.output).toContain("Page text of https://example.com/first");
+    expect(first.output).not.toContain("Page text of https://example.com/second");
+    expect(second.output).toContain("Page text of https://example.com/second");
+    // Each fetch navigated and read before the other navigated, whichever came first.
+    expect(order).toHaveLength(4);
+    for (const at of [0, 2]) {
+      expect(order[at]).toMatch(/^navigate /);
+      expect(order[at + 1]).toBe(order[at]!.replace(/^navigate /, "read "));
+    }
+  });
 });
 
 /**

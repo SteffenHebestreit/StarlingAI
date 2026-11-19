@@ -133,18 +133,23 @@ describe("masked edits", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("still sends an UNMASKED edit as JSON — the control that keeps the working path working", async () => {
-    // Without this, "always multipart" would satisfy the cases above while churning the shape
-    // that is already in production and measured fine.
+  it("sends an UNMASKED edit as a form too, with the picture and no mask part", async () => {
+    // Unmasked edits used to go as JSON, which the engine took; the proxy in front of it now
+    // routes /images/edits only from a form and answered every JSON edit with 400 (session
+    // bf079002). The picture rides as a file part and nothing invents a mask.
     const calls = stub({ mode: "img2img", strength: Math.fround(0.6) });
 
     await requestImageGeneration(EDITS, {
       prompt: "warmer light", tier: "quality", initImage: REF, strength: 0.6,
     });
 
-    expect(calls[0]!.form).toBeUndefined();
-    expect(calls[0]!.json!["image"]).toBe(REF);
-    expect(calls[0]!.json!["mask"]).toBeUndefined();
+    expect(calls[0]!.json).toBeUndefined();
+    expect(calls[0]!.form).toBeInstanceOf(FormData);
+    const image = calls[0]!.form!.get("image");
+    expect(image).toBeInstanceOf(Blob);
+    expect(Buffer.from(await (image as Blob).arrayBuffer()).toString("base64")).toBe(REF);
+    expect(calls[0]!.form!.get("mask")).toBeNull();
+    expect(calls[0]!.form!.get("strength")).toBe("0.6");
   });
 
   it("REFUSES a mask with no base image to mask", async () => {

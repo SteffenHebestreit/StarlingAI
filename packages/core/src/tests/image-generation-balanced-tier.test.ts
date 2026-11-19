@@ -10,6 +10,7 @@
  * render past the image server's own limit.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { imageRequestFields } from "./helpers/image-request-fields.js";
 
 import {
   expectedImageRenderSeconds,
@@ -44,15 +45,16 @@ const CLUSTER: ImageGenerationBackendConfig = {
 const BASE = Buffer.from("pretend-png-bytes").toString("base64");
 const MASK = Buffer.from("pretend-mask-bytes").toString("base64");
 
-interface Seen { url: string; json?: Record<string, unknown>; form?: FormData }
+interface Seen { url: string; json?: Record<string, unknown>; form?: FormData; fields: Record<string, unknown> }
 
 /** Answers like the cluster's endpoint: a reference edit reports mode "reference", an img2img edit its strength. */
 function stub(usageFor: (seen: Seen) => Record<string, unknown> | undefined = defaultUsage) {
   const calls: Seen[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fields = await imageRequestFields(init?.body);
     const seen: Seen = init?.body instanceof FormData
-      ? { url: String(input), form: init.body }
-      : { url: String(input), json: JSON.parse(String(init?.body)) as Record<string, unknown> };
+      ? { url: String(input), form: init.body, fields }
+      : { url: String(input), json: fields, fields };
     calls.push(seen);
     const usage = usageFor(seen);
     return new Response(JSON.stringify({ data: [{ b64_json: "QUJD" }], ...(usage ? { usage } : {}) }), {
@@ -121,9 +123,10 @@ describe("an edit goes to the cheapest engine that can take it", () => {
 
     const sent = calls[0]!;
     expect(sent.url).toMatch(/\/images\/edits$/);
-    expect(sent.json).toMatchObject({ model: "image-balanced", image: BASE });
+    expect(sent.form, "an edit goes multipart").toBeInstanceOf(FormData);
+    expect(sent.fields).toMatchObject({ model: "image-balanced", image: BASE });
     // The endpoint refuses `strength` by name for a reference engine; it must never be sent.
-    expect(sent.json).not.toHaveProperty("strength");
+    expect(sent.fields).not.toHaveProperty("strength");
     expect(result).toMatchObject({ tier: "balanced", tierUpgradedForEdit: true, referenceEdit: true });
   });
 

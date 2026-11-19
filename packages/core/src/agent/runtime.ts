@@ -273,7 +273,7 @@ import { earlyReturnTeaches, finalizeSuccessfulTurn, recordTurnLearning } from "
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
 import { primeRoutingEnglish } from "./routing-english.js";
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
+import { catalogSearchText, lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1955,7 +1955,10 @@ async function _runTurn(
   // The request in English, for every catalog search this turn makes with it
   // (agent/routing-english.ts). Asked for here, beside the front desk, so the discovery capsule
   // — which races the prompt's assembly — finds it done.
-  if (getConfig().orchestration?.discoveryPrefetch) primeRoutingEnglish(userMessage);
+  // Searched with the person's typed words (catalogSearchText): an attachment's inlined analysis in
+  // front of them is context, not the request.
+  const catalogQuery = catalogSearchText(userMessage, opts.userWords);
+  if (getConfig().orchestration?.discoveryPrefetch) primeRoutingEnglish(catalogQuery);
   const fastLaneOutput = await prepareReceptionistFastLane({
     eligible: detectedDynamicGuidance === null && !hasTurnAttachments && directiveAgent === undefined && getConfig().receptionist?.enabled === true,
     userMessage,
@@ -2099,7 +2102,7 @@ async function _runTurn(
   let prefetchAdmittedAgentCount = 0;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
-      userMessage,
+      userMessage: catalogQuery,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),

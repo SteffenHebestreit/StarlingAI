@@ -37,6 +37,20 @@ export const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
  * began only after the judge's wait and the document retrieval, and its embedding round-trip — up to
  * the whole cap — sat on the path to the first orchestrator token instead of behind them.
  */
+/**
+ * The text a turn's catalog searches read (the discovery capsule, the English rendering for it): what
+ * the person typed. The web chat puts an attachment's analysis IN FRONT of the typed words
+ * ("Image analysis (photo.jpg): ..."), and searched as a whole that analysis was the query: a photo's
+ * description ("a harbour quay at dusk ...") found no agent for "remove the cars in the
+ * background", and the turn answered that no tool could edit a photo (session bf079002). The
+ * analysis stays in the message the model reads; only the search leaves it out. With no typed words
+ * (a picture sent alone), or none known, the whole message.
+ */
+export function catalogSearchText(userMessage: string, userWords: string | undefined): string {
+  const typed = userWords?.trim();
+  return typed ? typed : userMessage;
+}
+
 export function startDiscoveryPrefetch(params: {
   userMessage: string;
   sessionId: string;

@@ -67,6 +67,22 @@ export interface TurnPerformanceMetrics {
    */
   qaLlmCalls?: number;
   qaLlmTimeMs?: number;
+  /**
+   * EVERY model call made inside the turn, by any agent: the orchestrator's own (llmTimeMs), the
+   * delegated specialists', their evidence distillation, the routing-tier verdicts, progress
+   * narration, the QA gates, and those of a workflow turn nested in this one. llmCalls/llmTimeMs
+   * stay the orchestrator loop's own calls (the Warden's slices are built on them), so they read
+   * low on a delegating turn: session e2b53b6f's 4.9-minute research turn showed "LLM time 20.5 s",
+   * while its researcher spent about 162 s in its own model calls, inside toolExecutionTimeMs.
+   *
+   * A SUM over calls, not wall-clock: calls that run side by side (parallel delegations, a
+   * distillation beside the next worker call) each count in full, so allModelTimeMs can exceed
+   * turnDurationMs. Tokens are what the servers reported; a call that reported none adds none.
+   */
+  allModelCalls?: number;
+  allModelTimeMs?: number;
+  allPromptTokens?: number;
+  allCompletionTokens?: number;
 }
 
 // Turn-scoped accumulator for per-stage wall-clock (A1). A turn runs inside one
@@ -78,6 +94,10 @@ interface TurnTimingStore {
   phases: Record<string, number>;
   /** The QA gates' model calls — see TurnPerformanceMetrics.qaLlmCalls. */
   qaLlm: { calls: number; timeMs: number };
+  /** Every model call made inside the turn — see TurnPerformanceMetrics.allModelCalls. */
+  model: { calls: number; timeMs: number; promptTokens: number; completionTokens: number };
+  /** The turn this one is nested in (run_workflow's step turn), whose totals take this one's too. */
+  parent?: TurnTimingStore;
 }
 
 const _phaseTimingsStore = new AsyncLocalStorage<TurnTimingStore>();
@@ -87,7 +107,32 @@ const _phaseTimingsStore = new AsyncLocalStorage<TurnTimingStore>();
  * `timedPhase()` call anywhere in the turn records into THIS turn's map.
  */
 export function runWithPhaseTimings<T>(fn: () => Promise<T>): Promise<T> {
-  return _phaseTimingsStore.run({ phases: Object.create(null) as Record<string, number>, qaLlm: { calls: 0, timeMs: 0 } }, fn);
+  const parent = _phaseTimingsStore.getStore();
+  return _phaseTimingsStore.run({
+    phases: Object.create(null) as Record<string, number>,
+    qaLlm: { calls: 0, timeMs: 0 },
+    model: { calls: 0, timeMs: 0, promptTokens: 0, completionTokens: 0 },
+    ...(parent ? { parent } : {}),
+  }, fn);
+}
+
+/**
+ * Count one model call into the turn it was made in, and into every turn that one is nested in
+ * (TurnPerformanceMetrics.allModelCalls). The providers call it where they write their
+ * provider_model_call row, so whatever agent made the call (the orchestrator, a delegated
+ * specialist, a distillation beside it) it lands in the turn that started the work. Outside a
+ * turn (a scene worker's own bookkeeping, a script) there is no store and nothing is counted.
+ */
+export function recordTurnModelCall(call: { durationMs: number; promptTokens?: number | null; completionTokens?: number | null }): void {
+  const durationMs = Number.isFinite(call.durationMs) && call.durationMs > 0 ? call.durationMs : 0;
+  const promptTokens = typeof call.promptTokens === "number" && call.promptTokens > 0 ? call.promptTokens : 0;
+  const completionTokens = typeof call.completionTokens === "number" && call.completionTokens > 0 ? call.completionTokens : 0;
+  for (let store = _phaseTimingsStore.getStore(); store; store = store.parent) {
+    store.model.calls += 1;
+    store.model.timeMs += durationMs;
+    store.model.promptTokens += promptTokens;
+    store.model.completionTokens += completionTokens;
+  }
 }
 
 export async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
@@ -217,5 +262,13 @@ export function buildTurnPerformanceMetrics(input: {
     ...(phaseTimingsMs ? { phaseTimingsMs } : {}),
     untrackedMs,
     ...(qaLlm ? { qaLlmCalls: qaLlm.calls, qaLlmTimeMs: qaLlm.timeMs } : {}),
+    ...(timingStore
+      ? {
+        allModelCalls: timingStore.model.calls,
+        allModelTimeMs: timingStore.model.timeMs,
+        allPromptTokens: timingStore.model.promptTokens,
+        allCompletionTokens: timingStore.model.completionTokens,
+      }
+      : {}),
   };
 }

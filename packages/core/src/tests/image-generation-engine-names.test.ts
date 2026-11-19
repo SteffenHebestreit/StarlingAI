@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { imageRequestFields } from "./helpers/image-request-fields.js";
 
 /**
  * A NAMED ENGINE REACHES ITS TIER, OR IS REFUSED BEFORE ANYTHING RENDERS.
@@ -175,7 +176,8 @@ describe("generate_image: engines are named, checked and reported", () => {
     const posts: Body[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (!init?.method || init.method === "GET") return new Response(JSON.stringify({ data: [] }), { status: 200 });
-      const body = JSON.parse(String(init.body)) as Body;
+      expect(init.body, "an edit goes multipart").toBeInstanceOf(FormData);
+      const body = await imageRequestFields(init.body);
       posts.push(body);
       expect(String(input)).toMatch(/\/images\/edits$/);
       return new Response(JSON.stringify({ data: [{ b64_json: PNG_1X1 }], usage: { mode: "reference" } }), {

@@ -54,6 +54,7 @@ import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, REASONING
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
 import { currentCallAttribution } from "../runtime/request-context.js";
+import { recordTurnModelCall } from "../agent/turn-metrics.js";
 
 const log = childLogger("provider:anthropic");
 
@@ -964,6 +965,12 @@ export class AnthropicProvider implements ChatProvider {
     const now = Date.now();
     // See the lmstudio emitter: ambient attribution so the row joins to its turn/agent.
     const attribution = currentCallAttribution();
+    // Into the turn's own totals too (turn-metrics.ts recordTurnModelCall).
+    recordTurnModelCall({
+      durationMs: now - input.startedAt,
+      promptTokens: input.usage?.promptTokens ?? null,
+      completionTokens: input.usage?.completionTokens ?? null,
+    });
     logAudit("provider_model_call", {
       ...attribution.data,
       model: input.modelId,
