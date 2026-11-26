@@ -4,6 +4,7 @@ import { inflateSync } from "node:zlib";
 import { Agent as UndiciAgent } from "undici";
 import Jimp from "jimp";
 import { compositeEditOntoOriginal, type EditComposite } from "./image-edit-composite.js";
+import { upscaleWithComfyModel } from "./comfyui-upscale.js";
 import { createConcurrencyGateFamily } from "../runtime/concurrency-gate.js";
 
 export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "openai-compatible";
@@ -228,6 +229,8 @@ export interface ImageGenerationResult {
     changedShare: number;
     composited: boolean;
     skipped?: "whole_picture" | "no_change" | "undecodable";
+    /** How the changed regions were enlarged to the original's size: by ComfyUI's upscaling model, or interpolated. */
+    patchScaling?: "model" | "interpolated";
   };
   mimeType: string;
   extension: string;
@@ -1008,7 +1011,8 @@ async function restoreEditResolution(
 ): Promise<{ composite?: EditComposite; report: NonNullable<ImageGenerationResult["editAtReducedSize"]> }> {
   const outcome = await compositeEditOntoOriginal(
     Buffer.from(original, "base64"), Buffer.from(sent, "base64"), Buffer.from(edited, "base64"),
-  ).catch(() => ({ changedShare: 0, skipped: "undecodable" as const, composite: undefined }));
+    { upscale: (png) => upscaleWithComfyModel(png) },
+  ).catch(() => ({ changedShare: 0, skipped: "undecodable" as const, composite: undefined, patchScaling: undefined }));
   return {
     ...(outcome.composite ? { composite: outcome.composite } : {}),
     report: {
@@ -1017,6 +1021,7 @@ async function restoreEditResolution(
       changedShare: Math.round(outcome.changedShare * 1000) / 1000,
       composited: Boolean(outcome.composite),
       ...(outcome.skipped ? { skipped: outcome.skipped } : {}),
+      ...(outcome.patchScaling ? { patchScaling: outcome.patchScaling } : {}),
     },
   };
 }

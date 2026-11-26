@@ -1099,7 +1099,10 @@ function describeReducedSizeEdit(result: ImageGenerationResult): string {
   if (reduced.composited) {
     return ` — The picture was edited at ${drawn}, the size the engines draw, and the regions the edit changed`
       + ` (${Math.max(1, Math.round(reduced.changedShare * 100))}% of the picture) were laid back onto the original at`
-      + ` ${result.width}x${result.height}: everything else is the original's own pixels, the changed regions are a little softer.`;
+      + ` ${result.width}x${result.height}: everything else is the original's own pixels`
+      + (reduced.patchScaling === "model"
+        ? ", and the changed regions were enlarged by an upscaling model."
+        : ", the changed regions are a little softer.");
   }
   if (reduced.skipped === "no_change") {
     return ` — NOTE: the edit changed nothing visible in the picture. Do not report the change as made; say it did not take.`;

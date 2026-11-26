@@ -29,6 +29,12 @@ const messages: LLMMessage[] = [
   { role: "user", content: "Say ok." },
 ];
 
+/**
+ * A timer can fire a millisecond before Date.now() says its delay has passed (CI measured 19 ms
+ * for a 20 ms wait): the timer runs on a monotonic clock, the measure on the wall clock.
+ */
+const TIMER_SLACK_MS = 3;
+
 /** A provider whose server answers every call with `usage`, after `delayMs`; or fails. */
 function provider(opts: { usage?: { prompt_tokens: number; completion_tokens: number }; delayMs?: number; fail?: boolean } = {}) {
   const instance = new LMStudioProvider("http://localhost:1234/v1", "test", base, { maxRetries: 0 });
@@ -78,7 +84,7 @@ describe("the turn report's all-agents model totals", () => {
     });
 
     expect(perf).toMatchObject({ llmCalls: 1, llmTimeMs: 5, allModelCalls: 2, allPromptTokens: 1500, allCompletionTokens: 100 });
-    expect(perf.allModelTimeMs).toBeGreaterThanOrEqual(30);
+    expect(perf.allModelTimeMs).toBeGreaterThanOrEqual(30 - TIMER_SLACK_MS);
   });
 
   it("counts a delegated agent's calls, which run in a request context of their own, in the turn that started them", async () => {
@@ -123,7 +129,7 @@ describe("the turn report's all-agents model totals", () => {
     });
 
     expect(perf).toMatchObject({ allModelCalls: 1, allPromptTokens: 0, allCompletionTokens: 0 });
-    expect(perf.allModelTimeMs).toBeGreaterThanOrEqual(20);
+    expect(perf.allModelTimeMs).toBeGreaterThanOrEqual(20 - TIMER_SLACK_MS);
   });
 
   it("outside a turn counts nothing and reports no totals", async () => {

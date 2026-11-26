@@ -3027,6 +3027,15 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
           && !looksLikeOnlyFailureStubs(output)
           && !looksLikePlanningOnlyResult(output)
           && !looksLikeInfrastructureFailure(output)
+          // A run that ENDED ON ITS OWN after only describing a deliverable it never made (asked
+          // for a file, wrote none; or claims a write that never happened) left an account of the
+          // work, not evidence of it. Session b0a37996: image_creator, asked for a file, read the
+          // picture, answered "I'll use generate_image with baseImage …" and stopped; the text
+          // named an "edited" picture, so the planning-phrase check above let it by, it was kept
+          // as a substantive partial, the delegation came back a success and the plan counted
+          // the step done. A run something cut short (timeout, iteration cap, a stop) keeps its
+          // text as before: what it gathered before the cut is real.
+          && !(narrativeOnly && stats?.terminalState === "completed")
         ) {
           bestPartialResult = {
             agentName: candidate,

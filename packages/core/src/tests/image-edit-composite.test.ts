@@ -123,6 +123,139 @@ describe("compositeEditOntoOriginal", () => {
   });
 });
 
+/**
+ * THE PATCH IS ENLARGED BY THE UPSCALER, AND ONLY THE PATCH.
+ *
+ * Interpolated three and a half times, a patch was visibly softer than the photo around it (the
+ * flower edit of session b0a37996, rebuilt: blurred sleeve and stem). The changed region alone is
+ * cut out, enlarged by an upscaling model and laid in; with no model, or no answer, it is
+ * interpolated as before.
+ */
+describe("the changed region's enlargement", () => {
+  /** A stand-in for the model: x4 by repeating pixels, with the blue channel marked so its pixels can be found. */
+  const markingUpscaler = (seen: Array<[number, number]>) => async (png: Buffer) => {
+    const crop = await Jimp.read(png);
+    seen.push([crop.bitmap.width, crop.bitmap.height]);
+    crop.resize(crop.bitmap.width * 4, crop.bitmap.height * 4, Jimp.RESIZE_NEAREST_NEIGHBOR);
+    crop.scan(0, 0, crop.bitmap.width, crop.bitmap.height, (_x, _y, at) => { crop.bitmap.data[at + 2] = 250; });
+    return crop.getBufferAsync(Jimp.MIME_PNG);
+  };
+
+  it("sends the upscaler the changed region, not the picture, and lays its result in", async () => {
+    const original = photo();
+    const sent = await scaledDown(original, 1184, 888);
+    const seen: Array<[number, number]> = [];
+
+    const outcome = await compositeEditOntoOriginal(
+      await original.getBufferAsync(Jimp.MIME_PNG), sent, await renderWithoutBlock(sent), { upscale: markingUpscaler(seen) },
+    );
+
+    expect(outcome.patchScaling).toBe("model");
+    expect(seen).toHaveLength(1);
+    // The block is 148x99 render pixels; with the grown outline and the margin, far less than 1184x888.
+    expect(seen[0]![0]).toBeLessThan(300);
+    expect(seen[0]![1]).toBeLessThan(250);
+    const result = await Jimp.read(Buffer.from(outcome.composite!.imageBase64, "base64"));
+    expect(pixel(result, BLOCK.x + BLOCK.w / 2, BLOCK.y + BLOCK.h / 2)[2]).toBeGreaterThan(200);
+    for (const [x, y] of [[100, 100], [600, 1500], [2300, 1700]] as const) {
+      expect(pixel(result, x, y)).toEqual(pixel(original, x, y));
+    }
+  });
+
+  it("interpolates when the upscaler gives nothing back, or a picture of another shape", async () => {
+    const original = photo();
+    const originalPng = await original.getBufferAsync(Jimp.MIME_PNG);
+    const sent = await scaledDown(original, 1184, 888);
+    const edited = await renderWithoutBlock(sent);
+    const square = await new Jimp(800, 800, 0x0000ffff).getBufferAsync(Jimp.MIME_PNG);
+
+    const nothing = await compositeEditOntoOriginal(originalPng, sent, edited, { upscale: async () => undefined });
+    const wrongShape = await compositeEditOntoOriginal(originalPng, sent, edited, { upscale: async () => square });
+    const plain = await compositeEditOntoOriginal(originalPng, sent, edited);
+
+    expect([nothing.patchScaling, wrongShape.patchScaling, plain.patchScaling]).toEqual(["interpolated", "interpolated", "interpolated"]);
+    expect(nothing.composite!.imageBase64).toBe(plain.composite!.imageBase64);
+    expect(wrongShape.composite!.imageBase64).toBe(plain.composite!.imageBase64);
+  });
+});
+
+/**
+ * A SMOOTH PATCH IN A GRAINY PHOTO GETS THE PHOTO'S GRAIN.
+ *
+ * Even sharp, a patch enlarged from a megapixel render has no sensor grain, and in a photo it reads
+ * as pasted on. The grain the photo has around the patch and the patch lacks is added to it; a
+ * picture with no grain gets none.
+ */
+describe("the patch's grain", () => {
+  const FLAT: [number, number, number] = [110, 150, 95];
+  /** A flat field, with a deterministic grain of `grain` levels (0: none), and the red block. */
+  function grainyPhoto(grain: number): Jimp {
+    const picture = new Jimp(WIDTH, HEIGHT, 0x000000ff);
+    picture.scan(0, 0, WIDTH, HEIGHT, (x, y, at) => {
+      const inBlock = x >= BLOCK.x && x < BLOCK.x + BLOCK.w && y >= BLOCK.y && y < BLOCK.y + BLOCK.h;
+      const hash = Math.imul(x * 374761393 + y * 668265263, 1274126177) >>> 0;
+      const speck = grain > 0 ? ((hash >>> 8) % (2 * grain + 1)) - grain : 0;
+      for (let channel = 0; channel < 3; channel += 1) {
+        picture.bitmap.data[at + channel] = inBlock ? [220, 30, 30][channel]! : FLAT[channel]! + speck;
+      }
+    });
+    return picture;
+  }
+
+  /** The render: the base with the block painted over in the flat colour, smooth. */
+  async function smoothRender(sent: Buffer): Promise<Buffer> {
+    const picture = await Jimp.read(sent);
+    const scale = picture.bitmap.width / WIDTH;
+    picture.scan(0, 0, picture.bitmap.width, picture.bitmap.height, (x, y, at) => {
+      const ox = x / scale;
+      const oy = y / scale;
+      if (ox < BLOCK.x - 6 || ox >= BLOCK.x + BLOCK.w + 6 || oy < BLOCK.y - 6 || oy >= BLOCK.y + BLOCK.h + 6) return;
+      for (let channel = 0; channel < 3; channel += 1) picture.bitmap.data[at + channel] = FLAT[channel]!;
+    });
+    return picture.getBufferAsync(Jimp.MIME_PNG);
+  }
+
+  /** The median fine detail (green against its four neighbours) in a rectangle. */
+  function fineDetail(picture: Jimp, x0: number, y0: number, width: number, height: number): number {
+    const values: number[] = [];
+    for (let y = y0; y < y0 + height; y += 1) {
+      for (let x = x0; x < x0 + width; x += 1) {
+        const around = (pixel(picture, x - 1, y)[1] + pixel(picture, x + 1, y)[1] + pixel(picture, x, y - 1)[1] + pixel(picture, x, y + 1)[1]) / 4;
+        values.push(Math.abs(pixel(picture, x, y)[1] - around));
+      }
+    }
+    values.sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)]!;
+  }
+
+  const inside = { x: BLOCK.x + 60, y: BLOCK.y + 50, w: BLOCK.w - 120, h: BLOCK.h - 100 };
+
+  it("adds the grain the photo has around the patch", async () => {
+    const original = grainyPhoto(6);
+    const sent = await scaledDown(original, 1184, 888);
+
+    const outcome = await compositeEditOntoOriginal(await original.getBufferAsync(Jimp.MIME_PNG), sent, await smoothRender(sent));
+
+    const result = await Jimp.read(Buffer.from(outcome.composite!.imageBase64, "base64"));
+    const photoGrain = fineDetail(original, 200, 1200, 200, 100);
+    const patchGrain = fineDetail(result, inside.x, inside.y, inside.w, inside.h);
+    expect(photoGrain).toBeGreaterThan(1);
+    expect(patchGrain).toBeGreaterThan(photoGrain * 0.5);
+    expect(patchGrain).toBeLessThan(photoGrain * 1.6);
+  });
+
+  it("adds none to a picture that has none — the control", async () => {
+    const original = grainyPhoto(0);
+    const sent = await scaledDown(original, 1184, 888);
+
+    const outcome = await compositeEditOntoOriginal(await original.getBufferAsync(Jimp.MIME_PNG), sent, await smoothRender(sent));
+
+    const result = await Jimp.read(Buffer.from(outcome.composite!.imageBase64, "base64"));
+    expect(fineDetail(result, inside.x, inside.y, inside.w, inside.h)).toBe(0);
+    expect(pixel(result, BLOCK.x + BLOCK.w / 2, BLOCK.y + BLOCK.h / 2)).toEqual(FLAT);
+  });
+});
+
 describe("an edit of a picture larger than the engines draw", () => {
   const CONFIG: ImageGenerationBackendConfig = {
     api: "openai-compatible",
