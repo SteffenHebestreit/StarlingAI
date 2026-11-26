@@ -73,11 +73,32 @@ describe("the conversation's attachments", () => {
     const { attachedFilesBlock } = await import("../agent/conversation-attachments.js");
 
     const block = attachedFilesBlock(RUN, "Entferne die Autos aus IMG_0042.jpg. Das Bild liegt im Workspace.");
-    expect(block).toContain("[FILES THE USER ATTACHED IN THIS CONVERSATION");
+    expect(block).toContain("[FILES IN THIS CONVERSATION");
     expect(block.indexOf(SECOND)).toBeGreaterThan(0);
     expect(block.indexOf(SECOND)).toBeLessThan(block.indexOf(FIRST));
     expect(attachedFilesBlock(RUN, `Edit ${SECOND}, the older copy is ${FIRST}.`)).toBe("");
     expect(attachedFilesBlock("chat-without-files", "anything")).toBe("");
+  });
+
+  // Session b0a37996: "try again on the version without the cars" — no path in the task, the shared
+  // latest_image expired overnight, and the specialist opened the upload WITH the cars.
+  it("name the files the conversation made beside the person's, newest first, each with who made it", async () => {
+    await chatWithTwoUploads();
+    const { createSession, getSession } = await import("../agent/session.js");
+    (getSession(CHAT) ?? createSession({ sessionId: CHAT, channel: "test", workspacePath: workspace })).addMessage({
+      role: "assistant", content: "Done: the cars are gone.",
+      metadata: { attachments: [{ filename: "IMG_0042_no_cars.png", relativePath: "generated/retouched/IMG_0042_no_cars.png", sourceTool: "generate_image" }] },
+    });
+    const { attachedFilesBlock, conversationAttachments } = await import("../agent/conversation-attachments.js");
+
+    expect(conversationAttachments(RUN).map((file) => [file.relativePath, file.origin])).toEqual([
+      ["generated/retouched/IMG_0042_no_cars.png", "made"],
+      [SECOND, "user"],
+      [FIRST, "user"],
+    ]);
+    const lines = attachedFilesBlock(RUN, "Put a flower in the figure's hand.").split("\n");
+    expect(lines[3]).toBe("- IMG_0042_no_cars.png: generated/retouched/IMG_0042_no_cars.png (made in this conversation)");
+    expect(lines[4]).toBe(`- IMG_0042.jpg: ${SECOND} (attached by the user)`);
   });
 
   it("carry a file's name into the prompt without its line breaks", async () => {

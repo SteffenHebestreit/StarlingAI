@@ -529,6 +529,22 @@ describe("deny policies on /api routes that take a token outside the Authorizati
   });
 });
 
+/**
+ * A wait that fails with what it was waiting for instead of hanging to the test timeout. This test
+ * timed out at 60 s twice on CI (never locally) with nothing in the log to say which step stalled.
+ */
+async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`stalled after ${ms} ms: ${what}`)), ms); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe("an upgrade whose caller is still being checked", () => {
   it("survives the client resetting the connection meanwhile", async () => {
     // Node takes its own error listener off a socket before it emits "upgrade". The /ws route policy
@@ -543,7 +559,7 @@ describe("an upgrade whose caller is still being checked", () => {
         const hold = holdNextResolution();
         const client = connectTcp(port, "127.0.0.1");
         client.on("error", () => { /* the reset is ours */ });
-        await once(client, "connect");
+        await within(once(client, "connect"), 10_000, `${path}: the TCP connection`);
         client.write([
           `GET ${path}?token=${HELD_TOKEN} HTTP/1.1`,
           `Host: 127.0.0.1:${port}`,
@@ -554,7 +570,7 @@ describe("an upgrade whose caller is still being checked", () => {
           "",
           "",
         ].join("\r\n"));
-        await hold.entered;
+        await within(hold.entered, 10_000, `${path}: the gateway never started checking the held caller`);
         client.resetAndDestroy();
         // The gateway reads the reset while the check still waits.
         await new Promise((resolve) => setTimeout(resolve, 200));
@@ -562,7 +578,7 @@ describe("an upgrade whose caller is still being checked", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       expect(uncaught).toEqual([]);
-      expect((await fetch(`${baseUrl}/healthz`)).ok).toBe(true);
+      expect((await within(fetch(`${baseUrl}/healthz`), 10_000, "/healthz after the resets")).ok).toBe(true);
       expect(await socket("/ws", header(tokens.operator))).toEqual({ status: 101, ws: "open" });
     } finally {
       process.off("uncaughtException", record);

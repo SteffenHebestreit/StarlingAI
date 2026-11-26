@@ -322,7 +322,7 @@ describe("sub-agent prompt prefix is stable across tasks", () => {
     expect(inChat.userTurn).toContain(`IMG_0042.jpg: ${upload}`);
     expect(inChat.userTurn.indexOf(upload)).toBeGreaterThan(inChat.userTurn.indexOf(TASK_NGINX));
     expect(inChat.head).toBe(elsewhere.head);
-    expect(elsewhere.userTurn).not.toContain("FILES THE USER ATTACHED");
+    expect(elsewhere.userTurn).not.toContain("FILES IN THIS CONVERSATION");
   });
 
   it("hands the user's words to the tools the specialist calls, so its own delegations carry them", async () => {

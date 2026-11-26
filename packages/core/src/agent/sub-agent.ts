@@ -4147,6 +4147,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // Times this run announced a next step without taking it. Bounded so a model that will
     // only ever narrate cannot spin to the iteration cap being told to act.
     let announcementNudges = 0;
+    // Times this run was handed back for ending without the file its delegation declared. One: a
+    // run that then says why it cannot make the file ends with that answer.
+    const FILE_DELIVERABLE_NUDGE_LIMIT = 1;
+    let fileDeliverableNudges = 0;
     // Consecutive iterations in which a staged build called tools but wrote nothing. The
     // announced-without-acting nudge cannot see this shape: the run IS calling tools, so
     // every existing guard reads it as busy and non-circling.
@@ -7148,6 +7152,50 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
             iterations++;
             continue;
           }
+        }
+
+        // A FILE WAS ASKED FOR AND NONE WAS MADE. The staged-build check above needs stub markers
+        // on disk; a single-call deliverable has none. Session b0a37996: image_creator was
+        // delegated "put a flower in the person's left hand" with deliverable "file", read the
+        // picture, answered "I'll use generate_image with baseImage on the balanced engine …"
+        // and stopped — an intention, no call, no file — and the plan counted the step done.
+        // The evidence is structural, not the wording: the delegator declared a file, and this
+        // run has produced no artifact and written nothing. Handed back once; a run that then
+        // says why it cannot make the file ends with that answer.
+        if (
+          opts.deliverable === "file"
+          && fileDeliverableNudges < FILE_DELIVERABLE_NUDGE_LIMIT
+          && artifacts.length === 0
+          && mutatedWorkspacePaths.size === 0
+          && iterations + 1 < maxIterations
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          fileDeliverableNudges++;
+          const said = normalizeSubAgentOutput(response.content).trim();
+          history.push({ role: "assistant", content: said.length > 0 ? said : "(no action taken)" });
+          history.push({
+            role: "user",
+            content: [
+              "YOUR TASK ASKS FOR A FILE, AND THIS RUN HAS NOT MADE ONE.",
+              "Saying what you are about to do is not doing it. Your next message must be the tool call that makes the file —",
+              "no preamble. If it cannot be made, say plainly why and what is missing instead.",
+            ].join(" "),
+          });
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "iteration",
+            verdict: "file_deliverable_missing",
+            action: "corrected",
+            reason: "the run returned text with no tool call, the delegation declared a file, and no file was made",
+            nudgeCount: fileDeliverableNudges,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          iterations++;
+          continue;
         }
 
         // A TABLE READ ACROSS PAGES IS COMPUTED, NOT COUNTED BY EYE. In the E2E run of 2026-10-22

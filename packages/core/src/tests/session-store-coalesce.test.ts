@@ -143,7 +143,10 @@ describe("coalesced session-store writes", () => {
     const session = store.createSession({ channel: "test", workspacePath: tempDir, systemPrompt: "A." });
     session.addMessage({ role: "user", content: "written at exit" });
     const inFlight = store.flushSessionStore();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Until the async write has started — a fixed 20 ms wait failed under a loaded full-suite run
+    // (2026-11-25), where the mkdir before the write had not returned yet.
+    const startedBy = Date.now() + 5_000;
+    while (storeWrites().length === 0 && Date.now() < startedBy) await new Promise((resolve) => setTimeout(resolve, 10));
     expect(storeWrites()).toHaveLength(1); // the async write has started...
     expect(existsSync(storePath)).toBe(false); // ...and not landed
 
