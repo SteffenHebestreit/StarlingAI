@@ -457,6 +457,45 @@ export async function publishImageArtifact(sessionId: string | undefined, relati
 /** Test seam: the handoff is the behaviour under test, not an implementation detail. */
 export const publishImageArtifactForTests = publishImageArtifact;
 
+/**
+ * transform_image with no operations: the picture under another name, or in another format, with
+ * its pixels as they were. Session b0a37996: image_creator wanted its finished edit under a
+ * readable name and ran `normalize` over the whole photo to get one — a contrast stretch the person
+ * never asked for, on the picture they had just approved.
+ */
+async function copyImage(path: string, requested: string | undefined, ctx: ToolContext): Promise<ToolResult> {
+  if (!requested) {
+    return fail("No operations and no outputPath: nothing to do. Give operations to change the picture, or an outputPath to save an exact copy.");
+  }
+  try {
+    const source = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);
+    const sourceExt = extname(source.relativePath).toLowerCase() || ".png";
+    const requestedExt = extname(requested).toLowerCase();
+    const encoded = await encodeImageAs(Buffer.from(source.bytes), requestedExt, sourceExt);
+    const outputPath = requestedExt ? `${stripFileExtension(requested)}${encoded.extension}` : `${requested}${encoded.extension}`;
+    const resolved = resolveWorkspacePath(outputPath, ctx.workspacePath);
+    if (resolved.relativePath === source.relativePath) return fail(`${outputPath} is the picture itself: nothing to copy.`);
+    await mkdir(resolve(resolved.resolved, ".."), { recursive: true });
+    await writeFile(resolved.resolved, encoded.bytes);
+    await publishImageArtifact(ctx.sessionId, resolved.relativePath);
+    const converted = encoded.bytes !== source.bytes && encoded.extension !== sourceExt;
+    return {
+      success: true,
+      output: `Saved ${converted ? `a ${encoded.extension.slice(1).toUpperCase()} copy` : "an exact copy"} of ${source.relativePath} to ${resolved.relativePath}; no pixel was changed.`
+        + (encoded.correctedFrom ? ` — NOTE: ${encoded.correctedFrom} cannot be produced here, so the file is ${encoded.extension}.` : ""),
+      metadata: {
+        outputPath: resolved.relativePath,
+        filename: basename(resolved.relativePath),
+        bytes: encoded.bytes.byteLength,
+        contentType: encoded.mimeType,
+        copiedFrom: source.relativePath,
+      },
+    };
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+}
+
 registerTool({
   name: "transform_image",
   description:
@@ -466,7 +505,9 @@ registerTool({
     + " baseImage. Runs locally in"
     + " milliseconds and costs the cluster nothing — it does NOT re-generate the picture, so"
     + " everything you are not changing stays exactly as it was. Use this, never the image model,"
-    + " when the request is about the image as a picture rather than about its content.",
+    + " when the request is about the image as a picture rather than about its content. With an EMPTY"
+    + " operations list it saves an exact copy under outputPath — to name or convert a picture without"
+    + " changing a pixel; never apply an operation nobody asked for.",
   embeddingDescription:
     "Sharpen, soften, blur, resize, scale, crop, trim, rotate, flip, brighten, darken, contrast,"
     + " grayscale, black and white, normalize an existing image. Bild schärfen, weichzeichnen,"
@@ -483,7 +524,7 @@ registerTool({
           + " {op, ...}: sharpen{amount 0-3, default 1}, soften{radius 1-144, default 2},"
           + " resize{width?, height?} (omit one to keep the aspect ratio), crop{x,y,width,height},"
           + " rotate{degrees}, flip{horizontal?, vertical?}, brightness{amount -1..1},"
-          + " contrast{amount -1..1}, grayscale{}, normalize{}.",
+          + " contrast{amount -1..1}, grayscale{}, normalize{}. Empty: an exact copy under outputPath.",
         items: { type: "object" },
       },
       outputPath: {
@@ -499,9 +540,7 @@ registerTool({
     const path = String(args["path"] ?? "").trim();
     if (!path) return fail("path is required");
     const operations = Array.isArray(args["operations"]) ? args["operations"] as ImageTransformOp[] : [];
-    if (operations.length === 0) {
-      return fail("operations is required — e.g. [{\"op\":\"sharpen\",\"amount\":0.5}]");
-    }
+    if (operations.length === 0) return copyImage(path, stringArg(args["outputPath"]), ctx);
 
     try {
       const source = await readWorkspaceBinaryFile(path, ctx.workspacePath, ctx.sessionId);

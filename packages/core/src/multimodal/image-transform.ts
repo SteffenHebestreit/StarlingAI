@@ -338,15 +338,18 @@ export async function encodeImageAs(
   sourceExtension = ".png",
 ): Promise<EncodedImage> {
   const wanted = requestedExtension.toLowerCase();
+  // The bytes stay as they came, so the type is the source's: a full-size edit of a JPEG photo is
+  // a JPEG (image-edit-composite.ts), and labelling it PNG put the wrong type on its data URL.
+  const sourceMime = ENCODABLE[sourceExtension.toLowerCase()] ?? Jimp.MIME_PNG;
   if (!wanted || wanted === sourceExtension) {
-    return { bytes: pngBytes, extension: sourceExtension, mimeType: Jimp.MIME_PNG };
+    return { bytes: pngBytes, extension: sourceExtension, mimeType: sourceMime };
   }
 
   const mime = ENCODABLE[wanted];
   if (!mime) {
     // Nothing we can encode. The bytes are what they are, so the NAME is what changes.
     return {
-      bytes: pngBytes, extension: sourceExtension, mimeType: Jimp.MIME_PNG, correctedFrom: wanted,
+      bytes: pngBytes, extension: sourceExtension, mimeType: sourceMime, correctedFrom: wanted,
     };
   }
 
