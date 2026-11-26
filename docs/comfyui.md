@@ -82,6 +82,16 @@ A template renders its authors' example until its prompt is changed. The prompt 
 
 A template whose models are not installed is refused as a starting point, and the answer names templates that run here. `allow_unready: true` starts from it anyway, for a workflow meant to be kept or used once the models are there.
 
+### Sharper patches in `generate_image` edits
+
+An edit of a photo larger than the image engines draw is made at about one megapixel. The regions it changed are then laid back onto the full-size original (`multimodal/image-edit-composite.ts`). When ComfyUI is set up and has a model in `upscale_models`, the changed region alone is enlarged with that model (`multimodal/comfyui-upscale.ts`). Without one, the region is interpolated, which is three to four times softer than the photo around it on a phone picture.
+
+The run uses one input file, `starlingai/edit-patch.png`, and a preview node, so nothing accumulates in ComfyUI's output folder. Runs go one at a time. The upscale is limited to 60 s, and on any failure the edit still comes back with the interpolated patch. The tool output says which way the patch was made.
+
+The patch also gets the grain of the photo around it, measured on both sides of the mask. A picture with no grain gets none.
+
+On this stack's ComfyUI, with the model already loaded, a 640×480 region was upscaled in 2.9 s and a 1000×750 region in 6.2 s. The first run after a start loads the model, and a 320×240 region took 6.2 s. The rebuilt flower edit of a 3072×4096 photo took 1.4 s longer with the model than with interpolation.
+
 ### Measured on an RTX 4080 (16 GB), ComfyUI 0.44.0
 
 - Official Qwen-Image 2.1 text-to-image template, 1 MP, 25 steps: 25 s cold (model load included), 12–14 s warm.
